@@ -31,6 +31,17 @@ export default function AuthModal({ onSignedIn }) {
   return;
 }
 
+const signInWithGithub = async () => {
+  setError(null);
+
+  const redirectTo = window.location.origin; // works for localhost + prod domain
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: "github",
+    options: { redirectTo },
+  });
+
+  if (error) setError(error.message);
+};
 
   // signup
   const { data, error } = await supabase.auth.signUp({ email, password });
@@ -76,6 +87,13 @@ export default function AuthModal({ onSignedIn }) {
           {error && <p className="text-sm text-red-600">{error}</p>}
 
           <div className="flex gap-2 pt-2">
+	    <button
+  		type="button"
+  		onClick={signInWithGithub}
+  		className="w-full mb-2 bg-black text-white rounded px-4 py-2 hover:opacity-90"
+		>
+  		Continue with GitHub
+		</button>
             <button
               onClick={() => handleAuth("signin")}
               className="flex-1 bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700"
