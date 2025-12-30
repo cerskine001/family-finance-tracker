@@ -5,60 +5,46 @@ import { supabase } from "../supabaseClient";
 export default function AuthModal({ onSignedIn }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState(null);
+  const [errorMsg, setErrorMsg] = useState(null);
 
- const handleAuth = async (type) => {
-  setError(null);
+  const signInWithGithub = async () => {
+    setErrorMsg(null);
 
-  if (!email || !password) {
-    setError("Please enter an email and password.");
-    return;
-  }
+    const redirectTo = window.location.origin; // localhost OR vercel domain
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "github",
+      options: { redirectTo },
+    });
 
-  if (type === "signin") {
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      setError(error.message);
+    if (error) setErrorMsg(error.message);
+  };
+
+  const handleAuth = async (type) => {
+    setErrorMsg(null);
+
+    if (!email || !password) {
+      setErrorMsg("Please enter an email and password.");
       return;
     }
-    if (data?.session) onSignedIn?.(); // close modal only if session exists
-    return;
-  }
 
-  if (error) {
-  console.error("Supabase auth error:", error);
-  setError(error.message);
-  return;
-}
+    if (type === "signin") {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (error) return setErrorMsg(error.message);
+      if (data?.session) onSignedIn?.();
+      return;
+    }
 
-const signInWithGithub = async () => {
-  setError(null);
+    // signup
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) return setErrorMsg(error.message);
 
-  const redirectTo = window.location.origin; // works for localhost + prod domain
-  const { error } = await supabase.auth.signInWithOAuth({
-    provider: "github",
-    options: { redirectTo },
-  });
-
-  if (error) setError(error.message);
-};
-
-  // signup
-  const { data, error } = await supabase.auth.signUp({ email, password });
-  if (error) {
-    setError(error.message);
-    return;
-  }
-
-  // If confirmations are ON, session will be null until email confirmed
-  if (data?.session) {
-    onSignedIn?.();
-  } else {
-    setError("Signup created. Email confirmation is enabled—confirm your email, then Sign In.");
-  }
-};
-
-
+    // If email confirmations are ON, session will be null until confirmed
+    if (data?.session) onSignedIn?.();
+    else setErrorMsg("Signup created. Confirm your email, then Sign In.");
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -84,16 +70,17 @@ const signInWithGithub = async () => {
             onChange={(e) => setPassword(e.target.value)}
           />
 
-          {error && <p className="text-sm text-red-600">{error}</p>}
+          {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
+
+          <button
+            type="button"
+            onClick={signInWithGithub}
+            className="w-full bg-black text-white rounded px-4 py-2 hover:opacity-90"
+          >
+            Continue with GitHub
+          </button>
 
           <div className="flex gap-2 pt-2">
-	    <button
-  		type="button"
-  		onClick={signInWithGithub}
-  		className="w-full mb-2 bg-black text-white rounded px-4 py-2 hover:opacity-90"
-		>
-  		Continue with GitHub
-		</button>
             <button
               onClick={() => handleAuth("signin")}
               className="flex-1 bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700"
