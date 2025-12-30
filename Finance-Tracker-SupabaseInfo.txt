@@ -1,0 +1,17 @@
+
+
+https://github.com/cerskine001/family-finance-tracker.git
+
+xWKW9hI0VwNdO9r7
+
+
+Project URL : https://kznkdrbvsjgltnomnydq.supabase.co
+API KEY: sb_publishable_ZEBUuvr5HVUNVIS_7-Pz0g_JV1YATz2
+
+
+VITE_SUPABASE_URL="https://kznkdrbvsjgltnomnydq.supabase.co"
+VITE_SUPABASE_ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bmtkcmJ2c2pnbHRub21ueWRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY5NjkxMTIsImV4cCI6MjA4MjU0NTExMn0.eox4M0NbdGZGylqTkq1JZ3kw6wdEvnl9wDzAN0C7GDM"
+
+ANON:   eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bmtkcmJ2c2pnbHRub21ueWRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY5NjkxMTIsImV4cCI6MjA4MjU0NTExMn0.eox4M0NbdGZGylqTkq1JZ3kw6wdEvnl9wDzAN0C7GDM
+
+Project ID:  kznkdrbvsjgltnomnydq

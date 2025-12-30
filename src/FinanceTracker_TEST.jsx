@@ -33,9 +33,6 @@ import {
 } from "date-fns";
 
 import TransactionCsvImport from "./components/TransactionCsvImport";
-import AuthModal from "./components/AuthModal";
-import HouseholdGate from "./components/HouseholdGate";
-import InviteMember from "./components/InviteMember";
 
 // -----------------------------------------------------------------------------
 // Simple storage helper
@@ -221,29 +218,6 @@ const FinanceTracker = () => {
 
 // Budget: per-card "show all transactions" toggle
 const [showAllBudgetTxns, setShowAllBudgetTxns] = useState({});
-
-const [isOwner, setIsOwner] = useState(false);
-
-useEffect(() => {
-  if (!session?.user?.id || !householdId) {
-    setIsOwner(false);
-    return;
-  }
-
-  (async () => {
-    const { data, error } = await supabase
-      .from("household_members")
-      .select("role")
-      .eq("user_id", session.user.id)
-      .eq("household_id", householdId)
-      .maybeSingle();
-
-    if (!error) {
-      setIsOwner(data?.role === "owner");
-    }
-  })();
-}, [session?.user?.id, householdId]);
-
 
   const categories = [
     "Food",
@@ -1245,15 +1219,10 @@ useEffect(() => {
   // Render
   // ---------------------------------------------------------------------------
   return (
-
     <div className="relative">
     {/* Your normal app UI (blurred + disabled until authenticated + household joined) */}
     <div className={canViewData ? "" : "pointer-events-none blur-sm select-none"}>
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
-	 {/* Owner-only tools */}
-    	{isOwner && canViewData && (
-      		<InviteMember session={session} />
-    	)}
       <div className="max-w-7xl mx-auto">
         <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
           <div className="flex justify-between items-center mb-4">
@@ -1278,18 +1247,6 @@ useEffect(() => {
                 </button>
               ))}
             </div>
-		{import.meta.env.DEV && (
-  		<button
-    		onClick={() => {
-      		setHouseholdId(null);
-      		setHouseholdGateOpen(true);
-    		}}
-    		className="text-xs text-gray-500 underline mt-4"
-  		>
-    		Reset household gate (testing)
-  		</button>
-		)}
-
           </div>
 
           <div className="flex gap-2 border-b">
@@ -2606,30 +2563,8 @@ useEffect(() => {
       </div>
     </div>
 
-    </div>  {/* ✅ closes canViewData blur/disable wrapper */}
-	 {/* =========================================================
-          MODAL GATES (must be OUTSIDE the blurred wrapper)
-          ========================================================= */}
-
-      {/* Auth modal gate */}
-      {authOpen && (
-        <AuthModal
-          onClose={() => {}}
-          onSignedIn={() => setAuthOpen(false)}
-        />
-      )}
-
-      {/* Household gate (only after signed in) */}
-      {!authOpen && householdGateOpen && (
-        <HouseholdGate
-          userId={session?.user?.id}
-          onDone={(hid) => {
-            setHouseholdId(hid);
-            setHouseholdGateOpen(false);
-          }}
-        />
-      )}
-    </div>  /* ✅ closes relative wrapper */
+    </div>
+    </div>
   );
 };
 

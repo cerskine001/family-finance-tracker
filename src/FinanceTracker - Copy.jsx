@@ -1,4 +1,5 @@
 // FinanceTracker.jsx
+import { supabase } from "./supabaseClient";
 import React, { useState, useMemo, useEffect, useCallback } from "react";
 import {
   PlusCircle,
@@ -158,6 +159,12 @@ const FinanceTracker = () => {
     useState("all");
   const [transactionFilterType, setTransactionFilterType] = useState("all");
 
+  const [session, setSession] = useState(null);
+  const [authOpen, setAuthOpen] = useState(false);
+
+  const [householdId, setHouseholdId] = useState(null);
+  const [householdGateOpen, setHouseholdGateOpen] = useState(false);
+
   // Form states
   const [newTransaction, setNewTransaction] = useState({
     date: new Date().toISOString().split("T")[0],
@@ -222,6 +229,66 @@ const [showAllBudgetTxns, setShowAllBudgetTxns] = useState({});
     "Shopping",
     "Other",
   ];
+
+   useEffect(() => {
+  let mounted = true;
+
+  // initial
+  supabase.auth.getSession().then(({ data }) => {
+    if (!mounted) return;
+    setSession(data.session ?? null);
+    setAuthOpen(!data.session);
+  });
+
+  // updates (login/logout)
+  const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    setSession(newSession);
+    setAuthOpen(!newSession);
+    if (!newSession) {
+      // optional: reset household on logout
+      setHouseholdId(null);
+      setHouseholdGateOpen(false);
+    }
+  });
+
+  return () => {
+    mounted = false;
+    sub.subscription.unsubscribe();
+  };
+}, []);
+
+
+  useEffect(() => {
+    if (!session?.user?.id) return;
+
+    // After login, check if user belongs to a household
+    (async () => {
+      const { data, error } = await supabase
+        .from("household_members")
+        .select("household_id")
+        .eq("user_id", session.user.id)
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        console.error(error);
+        setHouseholdId(null);
+        setHouseholdGateOpen(true);
+        return;
+      }
+
+      if (data?.household_id) {
+        setHouseholdId(data.household_id);
+        setHouseholdGateOpen(false);
+      } else {
+        setHouseholdId(null);
+        setHouseholdGateOpen(true);
+      }
+    })();
+  }, [session?.user?.id]);
+
+  const isAuthed = !!session?.user?.id;
+  const canViewData = isAuthed && !!householdId;
 
   // ---------------------------------------------------------------------------
   // Load data from storage on mount
