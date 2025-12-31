@@ -86,8 +86,9 @@ export default async function handler(req, res) {
     }
 
     // --- Invite via Supabase Admin ---
+    const redirectTo = `${process.env.APP_URL}/accept-invite`;
     const { data: inviteData, error: inviteErr } =
-      await supabaseAdmin.auth.admin.inviteUserByEmail(email);
+      await supabaseAdmin.auth.admin.inviteUserByEmail(email, { redirectTo });
 
     if (inviteErr) {
       return res.status(400).json({
