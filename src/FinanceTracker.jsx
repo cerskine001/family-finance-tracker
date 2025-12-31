@@ -1252,8 +1252,9 @@ useEffect(() => {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
 	 {/* Owner-only tools */}
     	{isOwner && canViewData && (
-      		<InviteMember session={session} />
-    	)}
+  		<InviteMember session={session} householdId={householdId} />
+	)}
+
       <div className="max-w-7xl mx-auto">
         <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
           <div className="flex justify-between items-center mb-4">

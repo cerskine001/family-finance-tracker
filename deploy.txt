@@ -1,0 +1,9 @@
+cd C:\dev\family-finance
+git add .
+git commit -m "Secret role key and additional error check"
+git push
+
+vercel dev
+vercel --prod
+
+

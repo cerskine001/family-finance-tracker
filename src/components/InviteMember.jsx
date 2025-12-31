@@ -1,49 +1,65 @@
 import { useState } from "react";
 
-export default function InviteMember({ session }) {
+export default function InviteMember({ session, householdId }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("member");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
   const invite = async () => {
-  setMsg(null);
-  setBusy(true);
+    setMsg(null);
+    setBusy(true);
 
-  try {
-    const r = await fetch("/api/invite", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ email, role }),
-    });
+    try {
+  	const token = session?.access_token;
 
-    const contentType = r.headers.get("content-type") || "";
-    const payload = contentType.includes("application/json")
-      ? await r.json()
-      : { error: await r.text() };
+  	console.log("[invite] sending", {
+    	url: "/api/invite",
+    	hasToken: !!token,
+    	tokenPrefix: token?.slice(0, 10),
+  	});
 
-    if (!r.ok) {
-      throw new Error(payload?.error || `Invite failed (${r.status})`);
+  	if (!token) {
+    	throw new Error("No access token found. Please sign in again.");
+  	}
+
+  	const r = await fetch("/api/invite", {
+    	method: "POST",
+    	headers: {
+      	"Content-Type": "application/json",
+      	Authorization: `Bearer ${token}`,
+    	},
+    	body: JSON.stringify({ email, role, householdId, }),
+  	});
+
+      // Read body ONCE, then try to parse
+      const text = await r.text();
+      let data = null;
+
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        // Not JSON (could be HTML, plain text, etc.)
+        data = null;
+      }
+
+      if (!r.ok) {
+        const serverMsg =
+          (data && (data.error || data.message)) ||
+          (text && text.trim()) ||
+          `Invite failed (${r.status})`;
+        throw new Error(serverMsg);
+      }
+
+      setMsg("Invite sent! They’ll receive an email to set password and sign in.");
+      setEmail("");
+      setRole("member");
+    } catch (e) {
+      setMsg(e?.message || "Invite failed");
+    } finally {
+      setBusy(false);
     }
-     const text = await r.text();
-	let j;
-	try { j = JSON.parse(text); } catch { j = { error: text }; }
-
-	if (!r.ok) throw new Error(j.error || "Invite failed"); 
-
-    setMsg("Invite sent! They’ll receive an email to set password and sign in.");
-    setEmail("");
-    setRole("member");
-  } catch (e) {
-    setMsg(e?.message || "Invite failed");
-  } finally {
-    setBusy(false);
-  }
-};
-
+  };
 
   return (
     <div className="border rounded-lg p-4 bg-indigo-50 space-y-2">
