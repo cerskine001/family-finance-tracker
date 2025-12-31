@@ -2,15 +2,29 @@
 import { useState } from "react";
 import { supabase } from "../supabaseClient";
 
+function isInviteOrRecoveryUrl() {
+  const href = window.location.href;
+  return (
+    href.includes("type=invite") ||
+    href.includes("type=recovery") ||
+    href.includes("access_token=") ||
+    href.includes("refresh_token=")
+  );
+}
+
 export default function AuthModal({ onSignedIn }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [errorMsg, setErrorMsg] = useState(null);
 
+  const inviteMode =
+    window.location.pathname === "/accept-invite" ||
+    isInviteOrRecoveryUrl();
+
   const signInWithGithub = async () => {
     setErrorMsg(null);
 
-    const redirectTo = window.location.origin; // localhost OR vercel domain
+    const redirectTo = window.location.origin;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "github",
       options: { redirectTo },
@@ -18,6 +32,9 @@ export default function AuthModal({ onSignedIn }) {
 
     if (error) setErrorMsg(error.message);
   };
+
+  // ...rest of file
+
 
   const handleAuth = async (type) => {
     setErrorMsg(null);
@@ -72,13 +89,16 @@ export default function AuthModal({ onSignedIn }) {
 
           {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
 
-          <button
-            type="button"
-            onClick={signInWithGithub}
-            className="w-full bg-black text-white rounded px-4 py-2 hover:opacity-90"
-          >
-            Continue with GitHub
-          </button>
+          {!inviteMode && (
+  	  <button
+    		type="button"
+    		onClick={signInWithGithub}
+    		className="w-full bg-black text-white rounded px-4 py-2 hover:opacity-90"
+  	  >
+    		Continue with GitHub
+  	  </button>
+	)}
+
 
           <div className="flex gap-2 pt-2">
             <button
@@ -87,12 +107,14 @@ export default function AuthModal({ onSignedIn }) {
             >
               Sign In
             </button>
+	    {!inviteMode && (
             <button
               onClick={() => handleAuth("signup")}
               className="flex-1 bg-gray-200 text-gray-800 rounded px-4 py-2 hover:bg-gray-300"
             >
               Sign Up
             </button>
+	    )}
           </div>
         </div>
       </div>
