@@ -7,30 +7,43 @@ export default function InviteMember({ session }) {
   const [msg, setMsg] = useState(null);
 
   const invite = async () => {
-    setMsg(null);
-    setBusy(true);
-    try {
-      const r = await fetch("/api/invite", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ email, role }),
-      });
+  setMsg(null);
+  setBusy(true);
 
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || "Invite failed");
+  try {
+    const r = await fetch("/api/invite", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ email, role }),
+    });
 
-      setMsg("Invite sent! They’ll receive an email to set password and sign in.");
-      setEmail("");
-      setRole("member");
-    } catch (e) {
-      setMsg(e.message);
-    } finally {
-      setBusy(false);
+    const contentType = r.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await r.json()
+      : { error: await r.text() };
+
+    if (!r.ok) {
+      throw new Error(payload?.error || `Invite failed (${r.status})`);
     }
-  };
+     const text = await r.text();
+	let j;
+	try { j = JSON.parse(text); } catch { j = { error: text }; }
+
+	if (!r.ok) throw new Error(j.error || "Invite failed"); 
+
+    setMsg("Invite sent! They’ll receive an email to set password and sign in.");
+    setEmail("");
+    setRole("member");
+  } catch (e) {
+    setMsg(e?.message || "Invite failed");
+  } finally {
+    setBusy(false);
+  }
+};
+
 
   return (
     <div className="border rounded-lg p-4 bg-indigo-50 space-y-2">
