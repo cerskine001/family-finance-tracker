@@ -84,6 +84,10 @@ export default async function handler(req, res) {
     if (!ownerRow || ownerRow.role !== "owner") {
       return res.status(403).json({ error: "Only household owners can invite" });
     }
+	// Send password reset
+	await supabase.auth.resetPasswordForEmail(email, {
+  	redirectTo: `${window.location.origin}/accept-invite`,
+	});
 
     // --- Invite via Supabase Admin ---
     const redirectTo = `${process.env.APP_URL}/accept-invite`;

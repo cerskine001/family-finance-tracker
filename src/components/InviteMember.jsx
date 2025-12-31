@@ -44,12 +44,16 @@ export default function InviteMember({ session, householdId }) {
       }
 
       if (!r.ok) {
-        const serverMsg =
-          (data && (data.error || data.message)) ||
-          (text && text.trim()) ||
-          `Invite failed (${r.status})`;
-        throw new Error(serverMsg);
-      }
+  	const serverMsg =
+    	(data && (data.details
+      	? `${data.error || "Invite failed"}: ${data.details}`
+      	: (data.error || data.message))) ||
+    	(text && text.trim()) ||
+    	`Invite failed (${r.status})`;
+
+  	throw new Error(serverMsg);
+	}
+
 
       setMsg("Invite sent! They’ll receive an email to set password and sign in.");
       setEmail("");
