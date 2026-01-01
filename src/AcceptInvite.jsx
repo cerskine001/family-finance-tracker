@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabaseClient";
+import logo from "./assets/finance-family-tracker-logo.png";
 
 function PasswordInput({
   label,
@@ -13,6 +14,13 @@ function PasswordInput({
   return (
     <div className="mt-3">
       <label className="block text-sm text-slate-700 mb-1">{label}</label>
+	<div className="flex flex-col items-center mb-4">
+  	<img
+    		src={logo}
+    		alt="Family Finance Tracker"
+    		className="h-16 mb-3"
+  	/>
+	</div>
 
       <div className="relative">
         <input

@@ -1,6 +1,7 @@
 // src/components/AuthModal.jsx
 import { useMemo, useState } from "react";
 import { supabase } from "../supabaseClient";
+import logo from "./assets/finance-family-tracker-logo.png";
 
 function isInviteOrRecoveryUrl() {
   const href = window.location.href;
@@ -22,6 +23,8 @@ function PasswordInput({
 
   return (
     <div className="relative">
+	<img src={logo} alt="Family Finance Tracker" className="h-10 mb-2" />
+
       <input
         type={show ? "text" : "password"}
         placeholder={placeholder}
