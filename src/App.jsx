@@ -1,9 +1,21 @@
 import FinanceTracker from "./FinanceTracker";
 import AcceptInvite from "./AcceptInvite";
 
+function isInviteOrRecoveryUrl() {
+  const href = window.location.href;
+  return (
+    href.includes("type=invite") ||
+    href.includes("type=recovery") ||
+    href.includes("access_token=") ||
+    href.includes("refresh_token=")
+  );
+}
+
 function App() {
-  // Simple path-based routing (no react-router)
-  if (window.location.pathname === "/accept-invite") {
+  const pathInvite = window.location.pathname === "/accept-invite";
+  const tokenInvite = isInviteOrRecoveryUrl();
+
+  if (pathInvite || tokenInvite) {
     return <AcceptInvite />;
   }
 
