@@ -14,14 +14,6 @@ function PasswordInput({
   return (
     <div className="mt-3">
       <label className="block text-sm text-slate-700 mb-1">{label}</label>
-	<div className="flex flex-col items-center mb-4">
-  	<img
-    		src={logo}
-    		alt="Family Finance Tracker"
-    		className="h-16 mb-3"
-  	/>
-	</div>
-
       <div className="relative">
         <input
           type={show ? "text" : "password"}
@@ -144,6 +136,15 @@ export default function AcceptInvite() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
       <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 p-6">
+
+	<div className="flex flex-col items-center mb-4">
+  	<img
+    		src={logo}
+    		alt="Family Finance Tracker"
+    		className="h-14 mb-2"
+  	/>
+	</div>
+
         <h2 className="text-xl font-bold text-slate-900">
           Finish setting up your account
         </h2>

@@ -1,7 +1,7 @@
 // src/components/AuthModal.jsx
 import { useMemo, useState } from "react";
 import { supabase } from "../supabaseClient";
-import logo from "./assets/finance-family-tracker-logo.png";
+import logo from "../assets/finance-family-tracker-logo.png";
 
 function isInviteOrRecoveryUrl() {
   const href = window.location.href;
@@ -23,7 +23,6 @@ function PasswordInput({
 
   return (
     <div className="relative">
-	<img src={logo} alt="Family Finance Tracker" className="h-10 mb-2" />
 
       <input
         type={show ? "text" : "password"}
@@ -107,6 +106,15 @@ export default function AuthModal({ onSignedIn }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+	
+	<div className="flex flex-col items-center mb-4">
+  	<img
+    		src={logo}
+    		alt="Family Finance Tracker"
+    		className="h-10 mb-2"
+  	/>
+	</div>
+
         <h2 className="text-xl font-bold mb-4 text-gray-800">
           Sign in to Family Finance Tracker
         </h2>
