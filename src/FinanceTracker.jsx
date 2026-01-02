@@ -3034,9 +3034,8 @@ const monthKeyToDate = (monthKey) => {
           }}
         />
       )}
-</div>
+    </div>
   );
-
 };
 
 export default FinanceTracker;
