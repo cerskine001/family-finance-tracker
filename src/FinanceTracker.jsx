@@ -1409,22 +1409,6 @@ const startEditBudget = (b) => {
   };
 
 
-// Normalize month values between UI ("YYYY-MM") and DB (text or date)
-const toMonthKey = (v) => {
-  if (!v) return "";
-  const s = String(v);
-  // if ISO date like 2026-01-01, keep YYYY-MM
-  if (s.length >= 10 && s[4] === "-" && s[7] === "-") return s.slice(0, 7);
-  return s.slice(0, 7);
-};
-
-const monthKeyToDate = (monthKey) => {
-  // For DB columns that may be DATE, Postgres needs YYYY-MM-DD
-  if (!monthKey) return null;
-  const mk = String(monthKey);
-  return mk.length === 7 ? `${mk}-01` : mk;
-};
-
   // ---------------------------------------------------------------------------
   // Loading state
   // ---------------------------------------------------------------------------
@@ -3010,10 +2994,10 @@ const monthKeyToDate = (monthKey) => {
             </div>
           </div>
         )}
-      </div>  {/* ✅ closes max-w-7xl mx-auto */}
-    </div>  {/* ✅ closes min-h-screen div */}
-    </div>  {/* ✅ closes blur/disable wrapper */}
-	 {/* =========================================================
+      </div>  {/* closes max-w-7xl mx-auto */}
+    </div>  {/* closes min-h-screen div */}
+    </div>  {/* closes blur/disable wrapper */}
+    {/* =========================================================
           MODAL GATES (must be OUTSIDE the blurred wrapper)
           ========================================================= */}
 
@@ -3035,7 +3019,7 @@ const monthKeyToDate = (monthKey) => {
           }}
         />
       )}
-    </div>  {/* ✅ closes relative wrapper */}
+    </div>
   );
 };
 
