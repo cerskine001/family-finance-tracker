@@ -143,8 +143,6 @@ const FinanceTracker = () => {
 
   // Assets state
   const [assets, setAssets] = useState([]);
-  const [editingAssetId, setEditingAssetId] = useState(null);
-  const [editAssetDraft, setEditAssetDraft] = useState(null);
 
   // Liabilities state
   const [liabilities, setLiabilities] = useState([]);
@@ -156,6 +154,17 @@ const FinanceTracker = () => {
 
   const [editingTransactionId, setEditingTransactionId] = useState(null);
   const [editTransactionDraft, setEditTransactionDraft] = useState(null);
+
+  // Inline editing for other entities
+  const [editingBudgetId, setEditingBudgetId] = useState(null);
+  const [editBudgetDraft, setEditBudgetDraft] = useState(null);
+
+  const [editingAssetId, setEditingAssetId] = useState(null);
+  const [editAssetDraft, setEditAssetDraft] = useState(null);
+
+  const [editingLiabilityId, setEditingLiabilityId] = useState(null);
+  const [editLiabilityDraft, setEditLiabilityDraft] = useState(null);
+
   const [rolloverEnabled, setRolloverEnabled] = useState(true);
 
   // Transactions table filters
@@ -246,6 +255,7 @@ useEffect(() => {
   })();
 }, [session?.user?.id, householdId]);
 
+
   const categories = [
     "Food",
     "Transportation",
@@ -318,181 +328,103 @@ useEffect(() => {
   const canViewData = isAuthed && !!householdId;
 
   // ---------------------------------------------------------------------------
-  // Load data from storage on mount
+  // Load data (Supabase when authed+in household; otherwise local demo defaults)
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    const loadData = async () => {
+    let ignore = false;
+    setIsLoading(true);
+
+    const loadFromDb = async () => {
+      if (!canViewData) return;
+
       try {
-        const defaultTransactions = [
-          {
-            id: 1,
-            date: "2024-12-01",
-            description: "Salary",
-            category: "Income",
-            amount: 5000,
-            type: "income",
-            person: "you",
-          },
-          {
-            id: 2,
-            date: "2024-12-01",
-            description: "Salary",
-            category: "Income",
-            amount: 4500,
-            type: "income",
-            person: "wife",
-          },
-          {
-            id: 3,
-            date: "2024-12-03",
-            description: "Groceries",
-            category: "Food",
-            amount: 250,
-            type: "expense",
-            person: "joint",
-          },
-          {
-            id: 4,
-            date: "2024-12-05",
-            description: "Gas",
-            category: "Transportation",
-            amount: 60,
-            type: "expense",
-            person: "you",
-          },
-        ];
-
-        const defaultAssets = [
-          { id: 1, name: "Savings Account", value: 15000, person: "joint" },
-          { id: 2, name: "Investment Portfolio", value: 25000, person: "you" },
-          { id: 3, name: "Retirement Fund", value: 30000, person: "wife" },
-        ];
-
-        const defaultLiabilities = [
-          { id: 1, name: "Mortgage", value: 200000, person: "joint" },
-          { id: 2, name: "Car Loan", value: 15000, person: "you" },
-        ];
-
-        const defaultBudgets = [
-          { id: 1, category: "Food", amount: 800, month: "2024-12", person: "joint" },
-          { id: 2, category: "Transportation", amount: 300, month: "2024-12", person: "joint" },
-          { id: 3, category: "Housing", amount: 2000, month: "2024-12", person: "joint" },
-          { id: 4, category: "Entertainment", amount: 200, month: "2024-12", person: "joint" },
-        ];
-
-        // Default recurring rules (normalize to "active")
-        const defaultRecurring = [
-          {
-            id: 1,
-            description: "Salary (You)",
-            category: "Income",
-            amount: 5000,
-            type: "income",
-            person: "you",
-            frequency: "monthly",
-            dayOfMonth: 1,
-            startDate: "2024-12-01",
-            endDate: null,
-            active: true,
-          },
-          {
-            id: 2,
-            description: "Salary (Wife)",
-            category: "Income",
-            amount: 4500,
-            type: "income",
-            person: "wife",
-            frequency: "monthly",
-            dayOfMonth: 1,
-            startDate: "2024-12-01",
-            endDate: null,
-            active: true,
-          },
-        ];
-
-        if (!storage) {
-          setTransactions(defaultTransactions);
-          setAssets(defaultAssets);
-          setLiabilities(defaultLiabilities);
-          setBudgets(defaultBudgets);
-          setRecurringRules(defaultRecurring);
-          setBudgetViewMonth(currentMonth);
-          return;
-        }
+        const uid = session.user.id;
 
         const [
-          transactionsResult,
-          assetsResult,
-          liabilitiesResult,
-          budgetsResult,
-          recurringResult,
+          txRes,
+          budRes,
+          aRes,
+          lRes,
+          rRes,
         ] = await Promise.all([
-          storage.get("finance-transactions").catch(() => null),
-          storage.get("finance-assets").catch(() => null),
-          storage.get("finance-liabilities").catch(() => null),
-          storage.get("finance-budgets").catch(() => null),
-          storage.get("finance-recurring-rules").catch(() => null),
+          supabase.from("transactions").select("*").eq("household_id", householdId).order("date", { ascending: false }),
+          supabase.from("budgets").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
+          supabase.from("assets").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
+          supabase.from("liabilities").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
+          supabase.from("recurring_rules").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
         ]);
 
-        // Transactions
-        if (transactionsResult?.value) {
-          setTransactions(JSON.parse(transactionsResult.value));
-        } else {
-          setTransactions(defaultTransactions);
-        }
+        if (ignore) return;
 
-        // Assets
-        if (assetsResult?.value) {
-          setAssets(JSON.parse(assetsResult.value));
-        } else {
-          setAssets(defaultAssets);
-        }
+        if (txRes.error) console.warn("[db] load transactions failed", txRes.error);
+        if (budRes.error) console.warn("[db] load budgets failed", budRes.error);
+        if (aRes.error) console.warn("[db] load assets failed", aRes.error);
+        if (lRes.error) console.warn("[db] load liabilities failed", lRes.error);
+        if (rRes.error) console.warn("[db] load recurring_rules failed", rRes.error);
 
-        // Liabilities
-        if (liabilitiesResult?.value) {
-          setLiabilities(JSON.parse(liabilitiesResult.value));
-        } else {
-          setLiabilities(defaultLiabilities);
-        }
+        const txns = (txRes.data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
+        const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount) }));
+        const assetsRows = (aRes.data ?? []).map((a) => ({ ...a, value: Number(a.value) }));
+        const liabRows = (lRes.data ?? []).map((l) => ({ ...l, value: Number(l.value) }));
+        const rules = (rRes.data ?? []).map((r) => ({ ...r, amount: Number(r.amount) }));
 
-        // Budgets
-        if (budgetsResult?.value) {
-          setBudgets(JSON.parse(budgetsResult.value));
-        } else {
-          setBudgets(defaultBudgets);
-        }
-
-        // Recurring rules (normalize enabled -> active)
-        if (recurringResult?.value) {
-          try {
-            const parsed = JSON.parse(recurringResult.value);
-            const normalized = Array.isArray(parsed)
-              ? parsed.map((r) => ({
-                  ...r,
-                  active: r.active ?? r.enabled ?? true,
-                }))
-              : [];
-            setRecurringRules(normalized);
-          } catch (e) {
-            console.error("Error parsing recurring rules:", e);
-            setRecurringRules([]);
-          }
-        } else {
-          setRecurringRules(defaultRecurring);
-        }
-
-        // Set budget view month to most recent month with any transactions, else current month
-        setBudgetViewMonth((prev) => prev || currentMonth);
-      } catch (error) {
-        console.error("Error loading data:", error);
+        setTransactions(txns);
+        setBudgets(buds);
+        setAssets(assetsRows);
+        setLiabilities(liabRows);
+        setRecurringRules(rules);
+      } catch (e) {
+        console.warn("[db] loadFromDb threw", e);
       } finally {
-        setIsLoading(false);
+        if (!ignore) setIsLoading(false);
       }
     };
 
-    loadData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const loadDemoDefaults = async () => {
+      try {
+        const defaultTransactions = [
+          { id: 1, date: "2024-12-01", description: "Salary", category: "Income", amount: 5000, type: "income", person: "joint" },
+          { id: 2, date: "2024-12-02", description: "Groceries", category: "Food", amount: 120, type: "expense", person: "joint" },
+          { id: 3, date: "2024-12-03", description: "Gas", category: "Transportation", amount: 45, type: "expense", person: "you" },
+        ];
+
+        const defaultBudgets = [
+          { id: 1, category: "Food", amount: 800, month: currentMonth, person: "joint" },
+          { id: 2, category: "Transportation", amount: 300, month: currentMonth, person: "you" },
+        ];
+
+        const defaultAssets = [
+          { id: 1, name: "Checking Account", value: 12000, person: "joint" },
+          { id: 2, name: "Brokerage Account", value: 50000, person: "you" },
+        ];
+
+        const defaultLiabilities = [
+          { id: 1, name: "Credit Card", value: 2500, person: "joint" },
+        ];
+
+        if (ignore) return;
+
+        setTransactions(defaultTransactions);
+        setBudgets(defaultBudgets);
+        setAssets(defaultAssets);
+        setLiabilities(defaultLiabilities);
+      } catch (e) {
+        console.warn("Failed to load demo defaults:", e);
+      } finally {
+        if (!ignore) setIsLoading(false);
+      }
+    };
+
+    if (canViewData) {
+      loadFromDb();
+    } else {
+      loadDemoDefaults();
+    }
+
+    return () => {
+      ignore = true;
+    };
+  }, [canViewData, householdId, session?.user?.id]);
 
   // ---------------------------------------------------------------------------
   // Save data to storage whenever it changes
@@ -953,76 +885,137 @@ useEffect(() => {
   // ---------------------------------------------------------------------------
   // Add functions
   // ---------------------------------------------------------------------------
-  const addTransaction = () => {
-    if (newTransaction.description && newTransaction.amount) {
-      setTransactions([
-        ...transactions,
-        {
-          ...newTransaction,
-          id: Date.now(),
-          amount: parseFloat(newTransaction.amount),
-        },
-      ]);
-      setNewTransaction({
-        date: new Date().toISOString().split("T")[0],
-        description: "",
-        category: "Food",
-        amount: "",
-        type: "expense",
-        person: "joint",
-      });
+  const addTransaction = async () => {
+    if (!newTransaction.description || !newTransaction.amount) return;
+
+    const draft = {
+      ...newTransaction,
+      amount: parseFloat(newTransaction.amount),
+    };
+
+    if (canViewData) {
+      const payload = {
+        household_id: householdId,
+        date: draft.date,
+        description: draft.description,
+        amount: draft.amount,
+        type: draft.type,
+        category: draft.category,
+        person: draft.person,
+        created_by: session.user.id,
+      };
+
+      const { data, error } = await supabase.from("transactions").insert(payload).select("*").single();
+      if (error) {
+        console.warn("[db] addTransaction failed", error);
+        alert(error.message);
+        return;
+      }
+      setTransactions((prev) => [{ ...data, amount: Number(data.amount) }, ...prev]);
+    } else {
+      setTransactions((prev) => [...prev, { ...draft, id: Date.now() }]);
     }
+
+    setNewTransaction({
+      date: new Date().toISOString().split("T")[0],
+      description: "",
+      category: "Food",
+      amount: "",
+      type: "expense",
+      person: "joint",
+    });
   };
 
-  const addAsset = () => {
-    if (newAsset.name && newAsset.value) {
-      setAssets([
-        ...assets,
-        {
-          ...newAsset,
-          id: Date.now(),
-          value: parseFloat(newAsset.value),
-        },
-      ]);
-      setNewAsset({ name: "", value: "", person: "joint" });
+  const addAsset = async () => {
+    if (!newAsset.name || !newAsset.value) return;
+
+    const draft = { ...newAsset, value: parseFloat(newAsset.value) };
+
+    if (canViewData) {
+      const payload = {
+        household_id: householdId,
+        name: draft.name,
+        value: draft.value,
+        person: draft.person,
+        created_by: session.user.id,
+      };
+
+      const { data, error } = await supabase.from("assets").insert(payload).select("*").single();
+      if (error) {
+        console.warn("[db] addAsset failed", error);
+        alert(error.message);
+        return;
+      }
+      setAssets((prev) => [{ ...data, value: Number(data.value) }, ...prev]);
+    } else {
+      setAssets((prev) => [...prev, { ...draft, id: Date.now() }]);
     }
+
+    setNewAsset({ name: "", value: "", person: "joint" });
   };
 
-  const addLiability = () => {
-    if (newLiability.name && newLiability.value) {
-      setLiabilities([
-        ...liabilities,
-        {
-          ...newLiability,
-          id: Date.now(),
-          value: parseFloat(newLiability.value),
-        },
-      ]);
-      setNewLiability({ name: "", value: "", person: "joint" });
+  const addLiability = async () => {
+    if (!newLiability.name || !newLiability.value) return;
+
+    const draft = { ...newLiability, value: parseFloat(newLiability.value) };
+
+    if (canViewData) {
+      const payload = {
+        household_id: householdId,
+        name: draft.name,
+        value: draft.value,
+        person: draft.person,
+        created_by: session.user.id,
+      };
+
+      const { data, error } = await supabase.from("liabilities").insert(payload).select("*").single();
+      if (error) {
+        console.warn("[db] addLiability failed", error);
+        alert(error.message);
+        return;
+      }
+      setLiabilities((prev) => [{ ...data, value: Number(data.value) }, ...prev]);
+    } else {
+      setLiabilities((prev) => [...prev, { ...draft, id: Date.now() }]);
     }
+
+    setNewLiability({ name: "", value: "", person: "joint" });
   };
 
-  const addBudget = () => {
-    if (newBudget.category && newBudget.amount && newBudget.month) {
-      setBudgets([
-        ...budgets,
-        {
-          ...newBudget,
-          id: Date.now(),
-          amount: parseFloat(newBudget.amount),
-        },
-      ]);
+  const addBudget = async () => {
+    if (!newBudget.category || !newBudget.amount || !newBudget.month) return;
 
-      // Nice UX: also jump Budget tab view to the month you just added
-      setBudgetViewMonth(newBudget.month);
+    const draft = { ...newBudget, amount: parseFloat(newBudget.amount) };
 
-      setNewBudget({
-        category: "Food",
-        amount: "",
-        month: currentMonth,
-        person: "joint",
-      });
+    if (canViewData) {
+      const payload = {
+        household_id: householdId,
+        category: draft.category,
+        amount: draft.amount,
+        month: draft.month,
+        person: draft.person,
+        created_by: session.user.id,
+      };
+
+      const { data, error } = await supabase.from("budgets").insert(payload).select("*").single();
+      if (error) {
+        console.warn("[db] addBudget failed", error);
+        alert(error.message);
+        return;
+      }
+      setBudgets((prev) => [{ ...data, amount: Number(data.amount) }, ...prev]);
+      setBudgetViewMonth(draft.month);
+    } else {
+      setBudgets((prev) => [...prev, { ...draft, id: Date.now() }]);
+      setBudgetViewMonth(draft.month);
     }
+
+    setNewBudget({
+      category: "Food",
+      amount: "",
+      month: draft.month,
+      person: "joint",
+    });
   };
 
   // ---------------------------------------------------------------------------
@@ -1127,19 +1120,39 @@ useEffect(() => {
   };
 
   // ---------------------------------------------------------------------------
-  // Delete functions
+  // Delete functions (DB-aware)
   // ---------------------------------------------------------------------------
-  const deleteTransaction = (id) => setTransactions(transactions.filter((t) => t.id !== id));
-  const deleteAsset = (id) => setAssets(assets.filter((a) => a.id !== id));
-  const deleteLiability = (id) => setLiabilities(liabilities.filter((l) => l.id !== id));
-  const deleteBudget = async (id) => {
-  if (!isDbReady) {
-    setBudgets((prev) => prev.filter((b) => b.id !== id));
-    return;
-  }
-  await deleteBudgetFromDb(id);
-};
+  const deleteTransaction = async (id) => {
+    if (canViewData) {
+      const { error } = await supabase.from("transactions").delete().eq("id", id).eq("household_id", householdId);
+      if (error) return alert(error.message);
+    }
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+  };
 
+  const deleteAsset = async (id) => {
+    if (canViewData) {
+      const { error } = await supabase.from("assets").delete().eq("id", id).eq("household_id", householdId);
+      if (error) return alert(error.message);
+    }
+    setAssets((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const deleteLiability = async (id) => {
+    if (canViewData) {
+      const { error } = await supabase.from("liabilities").delete().eq("id", id).eq("household_id", householdId);
+      if (error) return alert(error.message);
+    }
+    setLiabilities((prev) => prev.filter((l) => l.id !== id));
+  };
+
+  const deleteBudget = async (id) => {
+    if (canViewData) {
+      const { error } = await supabase.from("budgets").delete().eq("id", id).eq("household_id", householdId);
+      if (error) return alert(error.message);
+    }
+    setBudgets((prev) => prev.filter((b) => b.id !== id));
+  };
 
   // ---------------------------------------------------------------------------
   // Edit transaction helpers
@@ -1164,6 +1177,116 @@ useEffect(() => {
       ...editTransactionDraft,
       amount: parseFloat(editTransactionDraft.amount) || 0,
     };
+
+
+  // ---------------------------------------------------------------------------
+  // Edit helpers (Budgets / Assets / Liabilities)
+  // ---------------------------------------------------------------------------
+  const startEditBudget = (b) => {
+    setEditingBudgetId(b.id);
+    setEditBudgetDraft({ ...b, amount: String(b.amount ?? "") });
+  };
+  const cancelEditBudget = () => {
+    setEditingBudgetId(null);
+    setEditBudgetDraft(null);
+  };
+  const saveEditBudget = async () => {
+    if (!editBudgetDraft || editingBudgetId == null) return;
+
+    const updated = {
+      ...editBudgetDraft,
+      amount: parseFloat(editBudgetDraft.amount || "0"),
+    };
+
+    if (canViewData) {
+      const payload = {
+        category: updated.category,
+        amount: updated.amount,
+        month: updated.month,
+        person: updated.person,
+      };
+
+      const { data, error } = await supabase
+        .from("budgets")
+        .update(payload)
+        .eq("id", editingBudgetId)
+        .eq("household_id", householdId)
+        .select("*")
+        .single();
+
+      if (error) return alert(error.message);
+
+      setBudgets((prev) => prev.map((b) => (b.id === editingBudgetId ? { ...data, amount: Number(data.amount) } : b)));
+    } else {
+      setBudgets((prev) => prev.map((b) => (b.id === editingBudgetId ? updated : b)));
+    }
+
+    cancelEditBudget();
+  };
+
+  const startEditAsset = (a) => {
+    setEditingAssetId(a.id);
+    setEditAssetDraft({ ...a, value: String(a.value ?? "") });
+  };
+  const cancelEditAsset = () => {
+    setEditingAssetId(null);
+    setEditAssetDraft(null);
+  };
+  const saveEditAsset = async () => {
+    if (!editAssetDraft || editingAssetId == null) return;
+
+    const updated = { ...editAssetDraft, value: parseFloat(editAssetDraft.value || "0") };
+
+    if (canViewData) {
+      const payload = { name: updated.name, value: updated.value, person: updated.person };
+      const { data, error } = await supabase
+        .from("assets")
+        .update(payload)
+        .eq("id", editingAssetId)
+        .eq("household_id", householdId)
+        .select("*")
+        .single();
+      if (error) return alert(error.message);
+
+      setAssets((prev) => prev.map((a) => (a.id === editingAssetId ? { ...data, value: Number(data.value) } : a)));
+    } else {
+      setAssets((prev) => prev.map((a) => (a.id === editingAssetId ? updated : a)));
+    }
+
+    cancelEditAsset();
+  };
+
+  const startEditLiability = (l) => {
+    setEditingLiabilityId(l.id);
+    setEditLiabilityDraft({ ...l, value: String(l.value ?? "") });
+  };
+  const cancelEditLiability = () => {
+    setEditingLiabilityId(null);
+    setEditLiabilityDraft(null);
+  };
+  const saveEditLiability = async () => {
+    if (!editLiabilityDraft || editingLiabilityId == null) return;
+
+    const updated = { ...editLiabilityDraft, value: parseFloat(editLiabilityDraft.value || "0") };
+
+    if (canViewData) {
+      const payload = { name: updated.name, value: updated.value, person: updated.person };
+      const { data, error } = await supabase
+        .from("liabilities")
+        .update(payload)
+        .eq("id", editingLiabilityId)
+        .eq("household_id", householdId)
+        .select("*")
+        .single();
+      if (error) return alert(error.message);
+
+      setLiabilities((prev) => prev.map((x) => (x.id === editingLiabilityId ? { ...data, value: Number(data.value) } : x)));
+    } else {
+      setLiabilities((prev) => prev.map((x) => (x.id === editingLiabilityId ? updated : x)));
+    }
+
+    cancelEditLiability();
+  };
 
     setTransactions((prev) =>
       prev.map((t) => (t.id === editingTransactionId ? updated : t))
@@ -1260,9 +1383,8 @@ useEffect(() => {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
 	 {/* Owner-only tools */}
     	{isOwner && canViewData && (
-  		<InviteMember session={session} householdId={householdId} />
-	)}
-
+      		<InviteMember session={session} />
+    	)}
       <div className="max-w-7xl mx-auto">
         <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
           <div className="flex justify-between items-center mb-4">
@@ -2124,19 +2246,82 @@ useEffect(() => {
                   className="flex justify-between items-center border rounded p-4 hover:bg-gray-50"
                 >
                   <div>
-                    <p className="font-medium">{a.name}</p>
-                    <p className="text-sm text-gray-500">{personLabels[a.person]}</p>
+                    {editingAssetId === a.id ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          value={editAssetDraft?.name ?? ""}
+                          onChange={(e) => setEditAssetDraft((p) => ({ ...p, name: e.target.value }))}
+                          className="border rounded px-2 py-1 text-sm w-56"
+                          placeholder="Asset name"
+                        />
+                        <input
+                          type="number"
+                          value={editAssetDraft?.value ?? ""}
+                          onChange={(e) => setEditAssetDraft((p) => ({ ...p, value: e.target.value }))}
+                          className="border rounded px-2 py-1 text-sm w-28"
+                          placeholder="Value"
+                        />
+                        <select
+                          value={editAssetDraft?.person ?? "joint"}
+                          onChange={(e) => setEditAssetDraft((p) => ({ ...p, person: e.target.value }))}
+                          className="border rounded px-2 py-1 text-sm"
+                        >
+                          <option value="joint">Joint</option>
+                          <option value="you">You</option>
+                          <option value="wife">Wife</option>
+                        </select>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="font-medium">{a.name}</p>
+                        <p className="text-sm text-gray-500">{personLabels[a.person]}</p>
+                      </>
+                    )}
                   </div>
-                  <div className="flex items-center gap-4">
-                    <span className="font-bold text-green-600">
-                      ${a.value.toLocaleString()}
-                    </span>
-                    <button
-                      onClick={() => deleteAsset(a.id)}
-                      className="text-red-600 hover:text-red-800"
-                    >
-                      <Trash2 size={18} />
-                    </button>
+                  <div className="flex items-center gap-3">
+                    {editingAssetId === a.id ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={saveEditAsset}
+                          className="text-green-600 hover:text-green-800"
+                          title="Save"
+                        >
+                          <Check size={18} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEditAsset}
+                          className="text-gray-500 hover:text-gray-700"
+                          title="Cancel"
+                        >
+                          <X size={18} />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-bold text-green-600">
+                          ${Number(a.value || 0).toLocaleString()}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => startEditAsset(a)}
+                          className="text-gray-600 hover:text-gray-800"
+                          title="Edit"
+                        >
+                          <Pencil size={18} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteAsset(a.id)}
+                          className="text-red-600 hover:text-red-800"
+                          title="Delete"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -2205,19 +2390,62 @@ useEffect(() => {
                   className="flex justify-between items-center border rounded p-4 hover:bg-gray-50"
                 >
                   <div>
-                    <p className="font-medium">{l.name}</p>
-                    <p className="text-sm text-gray-500">{personLabels[l.person]}</p>
+                    {editingLiabilityId === l.id ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          value={editLiabilityDraft?.name ?? ""}
+                          onChange={(e) => setEditLiabilityDraft((p) => ({ ...p, name: e.target.value }))}
+                          className="border rounded px-2 py-1 text-sm w-56"
+                          placeholder="Liability name"
+                        />
+                        <input
+                          type="number"
+                          value={editLiabilityDraft?.value ?? ""}
+                          onChange={(e) => setEditLiabilityDraft((p) => ({ ...p, value: e.target.value }))}
+                          className="border rounded px-2 py-1 text-sm w-28"
+                          placeholder="Value"
+                        />
+                        <select
+                          value={editLiabilityDraft?.person ?? "joint"}
+                          onChange={(e) => setEditLiabilityDraft((p) => ({ ...p, person: e.target.value }))}
+                          className="border rounded px-2 py-1 text-sm"
+                        >
+                          <option value="joint">Joint</option>
+                          <option value="you">You</option>
+                          <option value="wife">Wife</option>
+                        </select>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="font-medium">{l.name}</p>
+                        <p className="text-sm text-gray-500">{personLabels[l.person]}</p>
+                      </>
+                    )}
                   </div>
-                  <div className="flex items-center gap-4">
-                    <span className="font-bold text-red-600">
-                      ${l.value.toLocaleString()}
-                    </span>
-                    <button
-                      onClick={() => deleteLiability(l.id)}
-                      className="text-red-600 hover:text-red-800"
-                    >
-                      <Trash2 size={18} />
-                    </button>
+                  <div className="flex items-center gap-3">
+                    {editingLiabilityId === l.id ? (
+                      <>
+                        <button type="button" onClick={saveEditLiability} className="text-green-600 hover:text-green-800" title="Save">
+                          <Check size={18} />
+                        </button>
+                        <button type="button" onClick={cancelEditLiability} className="text-gray-500 hover:text-gray-700" title="Cancel">
+                          <X size={18} />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-bold text-red-600">
+                          ${Number(l.value || 0).toLocaleString()}
+                        </span>
+                        <button type="button" onClick={() => startEditLiability(l)} className="text-gray-600 hover:text-gray-800" title="Edit">
+                          <Pencil size={18} />
+                        </button>
+                        <button type="button" onClick={() => deleteLiability(l.id)} className="text-red-600 hover:text-red-800" title="Delete">
+                          <Trash2 size={18} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -2392,10 +2620,58 @@ useEffect(() => {
                             </span>
                           )}
                         </div>
-                        <p className="text-sm text-gray-500">
-                          {monthLabelFromKey(b.month)}{" "}
-                          • {personLabels[b.person]}
-                        </p>
+                        {editingBudgetId === b.id ? (
+                          <div className="flex flex-wrap items-center gap-2 mt-1">
+                            <select
+                              value={editBudgetDraft?.category ?? b.category}
+                              onChange={(e) =>
+                                setEditBudgetDraft((p) => ({ ...p, category: e.target.value }))
+                              }
+                              className="border rounded px-2 py-1 text-sm"
+                            >
+                              {budgetCategories.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+
+                            <input
+                              type="month"
+                              value={editBudgetDraft?.month ?? b.month}
+                              onChange={(e) =>
+                                setEditBudgetDraft((p) => ({ ...p, month: e.target.value }))
+                              }
+                              className="border rounded px-2 py-1 text-sm"
+                            />
+
+                            <input
+                              type="number"
+                              value={editBudgetDraft?.amount ?? ""}
+                              onChange={(e) =>
+                                setEditBudgetDraft((p) => ({ ...p, amount: e.target.value }))
+                              }
+                              className="border rounded px-2 py-1 text-sm w-28"
+                              placeholder="Amount"
+                            />
+
+                            <select
+                              value={editBudgetDraft?.person ?? b.person}
+                              onChange={(e) =>
+                                setEditBudgetDraft((p) => ({ ...p, person: e.target.value }))
+                              }
+                              className="border rounded px-2 py-1 text-sm"
+                            >
+                              <option value="joint">Joint</option>
+                              <option value="you">You</option>
+                              <option value="wife">Wife</option>
+                            </select>
+                          </div>
+                        ) : (
+                          <p className="text-sm text-gray-500">
+                            {monthLabelFromKey(b.month)} • {personLabels[b.person]}
+                          </p>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3">
@@ -2408,14 +2684,45 @@ useEffect(() => {
                           {isExpanded ? "Hide" : "Details"}
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => deleteBudget(b.id)}
-                          className="text-red-600 hover:text-red-800"
-                          title="Delete budget"
-                        >
-                          <Trash2 size={18} />
-                        </button>
+                        {editingBudgetId === b.id ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={saveEditBudget}
+                              className="text-green-600 hover:text-green-800"
+                              title="Save"
+                            >
+                              <Check size={18} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEditBudget}
+                              className="text-gray-500 hover:text-gray-700"
+                              title="Cancel"
+                            >
+                              <X size={18} />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => startEditBudget(b)}
+                              className="text-gray-600 hover:text-gray-800"
+                              title="Edit budget"
+                            >
+                              <Pencil size={18} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteBudget(b.id)}
+                              className="text-red-600 hover:text-red-800"
+                              title="Delete budget"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
 
@@ -2613,9 +2920,10 @@ useEffect(() => {
           </div>
         )}
       </div>
-    </div>
 
-    </div>  {/* ✅ closes canViewData blur/disable wrapper */}
+
+    </div>  {/* ✅ closes min-h-screen div */}
+    </div>  {/* ✅ closes blur/disable wrapper */}
 	 {/* =========================================================
           MODAL GATES (must be OUTSIDE the blurred wrapper)
           ========================================================= */}
@@ -2638,8 +2946,9 @@ useEffect(() => {
           }}
         />
       )}
-    </div>  /* ✅ closes relative wrapper */
+    </div>
   );
+
 };
 
 export default FinanceTracker;
