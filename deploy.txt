@@ -1,6 +1,6 @@
 cd C:\dev\family-finance
 git add .
-git commit -m "Secret role key and additional error check"
+git commit -m "Persistent Load fixes"
 git push
 
 vercel dev
