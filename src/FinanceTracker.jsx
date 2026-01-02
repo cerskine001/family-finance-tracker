@@ -3012,8 +3012,6 @@ const monthKeyToDate = (monthKey) => {
         )}
       </div>
     </div>
-
-    </div>  {/* ✅ closes canViewData blur/disable wrapper */}
 	 {/* =========================================================
           MODAL GATES (must be OUTSIDE the blurred wrapper)
           ========================================================= */}
