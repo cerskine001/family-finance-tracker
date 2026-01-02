@@ -97,17 +97,11 @@ const buildTransactionsCsv = (rows) => {
 // ---------------------------------------------------------------------------
 // Month helpers (Budget Tab improvements)
 // ---------------------------------------------------------------------------
-const toMonthKey = (value) => {
-  if (!value) return "";
-  // Accept 'YYYY-MM', 'YYYY-MM-DD', or Date-ish strings.
-  const s = String(value);
-  const key = s.slice(0, 7);
-  return /^\d{4}-\d{2}$/.test(key) ? key : "";
-};
-
-const monthToDb = (monthKey) => {
-  const k = toMonthKey(monthKey);
-  return k ? `${k}-01` : null;
+const toMonthKey = (d) => {
+  const dt = d instanceof Date ? d : new Date(d);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
 };
 
 const prevMonthKey = (monthKey) => {
@@ -369,25 +363,10 @@ useEffect(() => {
         if (rRes.error) console.warn("[db] load recurring_rules failed", rRes.error);
 
         const txns = (txRes.data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
-        const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount), month: toMonthKey(b.month) }));
+        const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount) }));
         const assetsRows = (aRes.data ?? []).map((a) => ({ ...a, value: Number(a.value) }));
         const liabRows = (lRes.data ?? []).map((l) => ({ ...l, value: Number(l.value) }));
-        const rules = (rRes.data ?? []).map((r) => ({
-          id: r.id,
-          description: r.description,
-          category: r.category,
-          amount: Number(r.amount),
-          type: r.type,
-          person: r.person,
-          dayOfMonth: r.day_of_month ?? r.dayOfMonth ?? 1,
-          active: r.active !== false,
-          household_id: r.household_id,
-          created_by: r.created_by,
-          created_at: r.created_at,
-          frequency: r.frequency ?? 'monthly',
-          start_date: r.start_date,
-          end_date: r.end_date,
-        }));
+        const rules = (rRes.data ?? []).map((r) => ({ ...r, amount: Number(r.amount) }));
 
         setTransactions(txns);
         setBudgets(buds);
@@ -838,7 +817,7 @@ useEffect(() => {
 
   // Budget tab: filter budgets by selected view month
   const budgetsForViewMonth = useMemo(() => {
-    return filteredBudgets.filter((b) => toMonthKey(b.month) === budgetViewMonth);
+    return filteredBudgets.filter((b) => b.month === budgetViewMonth);
   }, [filteredBudgets, budgetViewMonth]);
 
 
@@ -1024,19 +1003,11 @@ useEffect(() => {
         alert(error.message);
         return;
       }
-      setBudgets((prev) => [
-        {
-          ...data,
-          amount: Number(data.amount),
-          month: toMonthKey(data.month),
-          person: data.person ?? draft.person,
-        },
-        ...prev,
-      ]);
-      setBudgetViewMonth(toMonthKey(draft.month));
+      setBudgets((prev) => [{ ...data, amount: Number(data.amount) }, ...prev]);
+      setBudgetViewMonth(draft.month);
     } else {
       setBudgets((prev) => [...prev, { ...draft, id: Date.now() }]);
-      setBudgetViewMonth(toMonthKey(draft.month));
+      setBudgetViewMonth(draft.month);
     }
 
     setNewBudget({
@@ -1211,102 +1182,41 @@ useEffect(() => {
   // ---------------------------------------------------------------------------
   // Edit helpers (Budgets / Assets / Liabilities)
   // ---------------------------------------------------------------------------
-  
-  const addRecurringRule = async () => {
-    if (!session?.user?.id || !householdId) return;
-
-    const description = newRecurring.description?.trim();
-    const amountNum = Number(newRecurring.amount);
-
-    if (!description) {
-      alert("Please enter a description for the recurring item.");
-      return;
-    }
-    if (!Number.isFinite(amountNum)) {
-      alert("Please enter a valid amount.");
-      return;
-    }
-
-    const payload = {
-      household_id: householdId,
-      description,
-      category: newRecurring.category,
-      amount: amountNum,
-      type: newRecurring.type,
-      person: newRecurring.person,
-      frequency: "monthly",
-      day_of_month: Number(newRecurring.dayOfMonth) || 1,
-      start_date: null,
-      end_date: null,
-      active: true,
-      created_by: session.user.id,
-    };
-
-    try {
-      const { data, error } = await supabase
-        .from("recurring_rules")
-        .insert(payload)
-        .select("*")
-        .single();
-
-      if (error) throw error;
-
-      setRecurringRules((prev) => [data, ...prev]);
-      setNewRecurring((prev) => ({
-        ...prev,
-        description: "",
-        amount: "",
-        dayOfMonth: 1,
-      }));
-    } catch (e) {
-      console.error("[db] addRecurringRule failed", e);
-      alert("Could not add recurring rule. Check console for details.");
-    }
-  };
-
-const startEditBudget = (b) => {
+  const startEditBudget = (b) => {
     setEditingBudgetId(b.id);
-    setEditBudgetDraft({ ...b, amount: String(b.amount ?? ""), month: toMonthKey(b.month) });
+    setEditBudgetDraft({ ...b, amount: String(b.amount ?? "") });
   };
   const cancelEditBudget = () => {
     setEditingBudgetId(null);
     setEditBudgetDraft(null);
   };
   const saveEditBudget = async () => {
-    if (!editBudgetDraft || !editingBudgetId) return;
+    if (!editBudgetDraft || editingBudgetId == null) return;
 
     const updated = {
       ...editBudgetDraft,
       amount: parseFloat(editBudgetDraft.amount || "0"),
-      month: monthToDb(editBudgetDraft.month),
     };
 
-    if (useDb && householdId) {
+    if (canViewData) {
+      const payload = {
+        category: updated.category,
+        amount: updated.amount,
+        month: updated.month,
+        person: updated.person,
+      };
+
       const { data, error } = await supabase
         .from("budgets")
-        .update({
-          category: updated.category,
-          amount: updated.amount,
-          month: updated.month,
-          person: updated.person,
-        })
+        .update(payload)
         .eq("id", editingBudgetId)
-        .select()
+        .eq("household_id", householdId)
+        .select("*")
         .single();
 
-      if (error) {
-        console.error("[db] saveEditBudget failed", error);
-        alert("Edit budget failed: " + (error.message || "Unknown error"));
-        return;
-      }
+      if (error) return alert(error.message);
 
-      setBudgets((prev) =>
-        prev.map((b) =>
-          b.id === editingBudgetId
-            ? { ...data, amount: Number(data.amount), month: toMonthKey(data.month) }
-            : b
-        )
-      );
+      setBudgets((prev) => prev.map((b) => (b.id === editingBudgetId ? { ...data, amount: Number(data.amount) } : b)));
     } else {
       setBudgets((prev) => prev.map((b) => (b.id === editingBudgetId ? updated : b)));
     }
@@ -1423,23 +1333,6 @@ const startEditBudget = (b) => {
     you: "You",
     wife: "Wife",
   };
-
-
-// Normalize month values between UI ("YYYY-MM") and DB (text or date)
-const toMonthKey = (v) => {
-  if (!v) return "";
-  const s = String(v);
-  // if ISO date like 2026-01-01, keep YYYY-MM
-  if (s.length >= 10 && s[4] === "-" && s[7] === "-") return s.slice(0, 7);
-  return s.slice(0, 7);
-};
-
-const monthKeyToDate = (monthKey) => {
-  // For DB columns that may be DATE, Postgres needs YYYY-MM-DD
-  if (!monthKey) return null;
-  const mk = String(monthKey);
-  return mk.length === 7 ? `${mk}-01` : mk;
-};
 
   // ---------------------------------------------------------------------------
   // Loading state
@@ -3027,7 +2920,9 @@ const monthKeyToDate = (monthKey) => {
           </div>
         )}
       </div>
-    </div>
+
+
+    </div>  {/* ✅ closes canViewData blur/disable wrapper */}
 	 {/* =========================================================
           MODAL GATES (must be OUTSIDE the blurred wrapper)
           ========================================================= */}
@@ -3052,6 +2947,7 @@ const monthKeyToDate = (monthKey) => {
       )}
     </div>
   );
+
 };
 
 export default FinanceTracker;
