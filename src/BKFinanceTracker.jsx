@@ -363,25 +363,10 @@ useEffect(() => {
         if (rRes.error) console.warn("[db] load recurring_rules failed", rRes.error);
 
         const txns = (txRes.data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
-        const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount), month: toMonthKey(b.month) }));
+        const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount) }));
         const assetsRows = (aRes.data ?? []).map((a) => ({ ...a, value: Number(a.value) }));
         const liabRows = (lRes.data ?? []).map((l) => ({ ...l, value: Number(l.value) }));
-        const rules = (rRes.data ?? []).map((r) => ({
-          id: r.id,
-          description: r.description,
-          category: r.category,
-          amount: Number(r.amount),
-          type: r.type,
-          person: r.person,
-          dayOfMonth: r.day_of_month ?? r.dayOfMonth ?? 1,
-          active: r.active !== false,
-          household_id: r.household_id,
-          created_by: r.created_by,
-          created_at: r.created_at,
-          frequency: r.frequency ?? 'monthly',
-          start_date: r.start_date,
-          end_date: r.end_date,
-        }));
+        const rules = (rRes.data ?? []).map((r) => ({ ...r, amount: Number(r.amount) }));
 
         setTransactions(txns);
         setBudgets(buds);
@@ -1348,23 +1333,6 @@ useEffect(() => {
     you: "You",
     wife: "Wife",
   };
-
-
-// Normalize month values between UI ("YYYY-MM") and DB (text or date)
-const toMonthKey = (v) => {
-  if (!v) return "";
-  const s = String(v);
-  // if ISO date like 2026-01-01, keep YYYY-MM
-  if (s.length >= 10 && s[4] === "-" && s[7] === "-") return s.slice(0, 7);
-  return s.slice(0, 7);
-};
-
-const monthKeyToDate = (monthKey) => {
-  // For DB columns that may be DATE, Postgres needs YYYY-MM-DD
-  if (!monthKey) return null;
-  const mk = String(monthKey);
-  return mk.length === 7 ? `${mk}-01` : mk;
-};
 
   // ---------------------------------------------------------------------------
   // Loading state
