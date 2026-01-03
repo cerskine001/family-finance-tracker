@@ -272,8 +272,10 @@ useEffect(() => {
     "Shopping",
     "Other",
   ];
+ // Budget categories use the same category list
+ const budgetCategories = categories;
 
-   useEffect(() => {
+  useEffect(() => {
   let mounted = true;
 
   // initial
@@ -1218,20 +1220,55 @@ const addRecurringRule = async () => {
     setEditTransactionDraft(null);
   };
 
-  const saveEditTransaction = () => {
-    if (!editTransactionDraft || editingTransactionId == null) return;
+ const saveEditTransaction = async () => {
+  if (!editTransactionDraft || editingTransactionId == null) return;
 
-    const updated = {
-      ...editTransactionDraft,
-      amount: parseFloat(editTransactionDraft.amount) || 0,
-    };
-  setTransactions((prev) =>
-      prev.map((t) => (t.id === editingTransactionId ? updated : t))
-    );
-
-    setEditingTransactionId(null);
-    setEditTransactionDraft(null);
+  const updated = {
+    ...editTransactionDraft,
+    amount: parseFloat(editTransactionDraft.amount) || 0,
   };
+
+  // Optimistic UI update
+  setTransactions((prev) =>
+    prev.map((t) => (t.id === editingTransactionId ? { ...t, ...updated } : t))
+  );
+
+  // Persist (if DB is enabled)
+  if (canViewData && householdId && session?.user?.id) {
+    const { data, error } = await supabase
+      .from("transactions")
+      .update({
+        date: updated.date,
+        description: updated.description,
+        amount: updated.amount,
+        type: updated.type,
+        category: updated.category,
+        person: updated.person,
+      })
+      .eq("id", editingTransactionId)
+      .eq("household_id", householdId)
+      .select("*")
+      .single();
+
+    if (error) {
+      console.error("[db] saveEditTransaction failed", error);
+      alert(error.message || "Could not save transaction. Check console.");
+      return; // keep edit mode open if desired (see note below)
+    }
+
+    // Ensure amount is numeric + keep state in sync with DB
+    setTransactions((prev) =>
+      prev.map((t) =>
+        t.id === editingTransactionId ? { ...data, amount: Number(data.amount) } : t
+      )
+    );
+  }
+
+  // Close edit mode
+  setEditingTransactionId(null);
+  setEditTransactionDraft(null);
+};
+
 
   // ---------------------------------------------------------------------------
   // Edit helpers (Budgets / Assets / Liabilities)
