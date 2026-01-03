@@ -1039,33 +1039,61 @@ useEffect(() => {
     });
   };
 
+const addRecurringRule = async () => {
+    if (!session?.user?.id || !householdId) return;
+
+    const description = newRecurring.description?.trim();
+    const amountNum = Number(newRecurring.amount);
+
+    if (!description) {
+      alert("Please enter a description for the recurring item.");
+      return;
+    }
+    if (!Number.isFinite(amountNum)) {
+      alert("Please enter a valid amount.");
+      return;
+    }
+
+    const payload = {
+      household_id: householdId,
+      description,
+      category: newRecurring.category,
+      amount: amountNum,
+      type: newRecurring.type,
+      person: newRecurring.person,
+      frequency: "monthly",
+      day_of_month: Number(newRecurring.dayOfMonth) || 1,
+      start_date: null,
+      end_date: null,
+      active: true,
+      created_by: session.user.id,
+    };
+
+    try {
+      const { data, error } = await supabase
+        .from("recurring_rules")
+        .insert(payload)
+        .select("*")
+        .single();
+
+      if (error) throw error;
+
+      setRecurringRules((prev) => [data, ...prev]);
+      setNewRecurring((prev) => ({
+        ...prev,
+        description: "",
+        amount: "",
+        dayOfMonth: 1,
+      }));
+    } catch (e) {
+      console.error("[db] addRecurringRule failed", e);
+      alert("Could not add recurring rule. Check console for details.");
+    }
+  };
+
   // ---------------------------------------------------------------------------
   // Recurring transaction helpers (monthly)
   // ---------------------------------------------------------------------------
-  const addRecurringRule = () => {
-    if (!newRecurring.description || !newRecurring.amount) return;
-
-    setRecurringRules((prev) => [
-      ...prev,
-      {
-        ...newRecurring,
-        id: Date.now(),
-        amount: parseFloat(newRecurring.amount),
-        dayOfMonth: Number(newRecurring.dayOfMonth) || 1,
-        active: true,
-      },
-    ]);
-
-    setNewRecurring({
-      description: "",
-      category: "Food",
-      amount: "",
-      type: "expense",
-      person: "joint",
-      dayOfMonth: 1,
-    });
-  };
-
   const deleteRecurringRule = (id) => {
     setRecurringRules((prev) => prev.filter((r) => r.id !== id));
   };
@@ -1090,7 +1118,6 @@ useEffect(() => {
 
   setUserToggledBudgets((prev) => ({ ...prev, [budgetId]: true }));
 };
-
 
   const applyRecurringForCurrentMonth = () => {
     if (!recurringRules.length) {
@@ -1198,63 +1225,19 @@ useEffect(() => {
       ...editTransactionDraft,
       amount: parseFloat(editTransactionDraft.amount) || 0,
     };
+  setTransactions((prev) =>
+      prev.map((t) => (t.id === editingTransactionId ? updated : t))
+    );
 
+    setEditingTransactionId(null);
+    setEditTransactionDraft(null);
+  };
 
   // ---------------------------------------------------------------------------
   // Edit helpers (Budgets / Assets / Liabilities)
   // ---------------------------------------------------------------------------
   
-  const addRecurringRule = async () => {
-    if (!session?.user?.id || !householdId) return;
-
-    const description = newRecurring.description?.trim();
-    const amountNum = Number(newRecurring.amount);
-
-    if (!description) {
-      alert("Please enter a description for the recurring item.");
-      return;
-    }
-    if (!Number.isFinite(amountNum)) {
-      alert("Please enter a valid amount.");
-      return;
-    }
-
-    const payload = {
-      household_id: householdId,
-      description,
-      category: newRecurring.category,
-      amount: amountNum,
-      type: newRecurring.type,
-      person: newRecurring.person,
-      frequency: "monthly",
-      day_of_month: Number(newRecurring.dayOfMonth) || 1,
-      start_date: null,
-      end_date: null,
-      active: true,
-      created_by: session.user.id,
-    };
-
-    try {
-      const { data, error } = await supabase
-        .from("recurring_rules")
-        .insert(payload)
-        .select("*")
-        .single();
-
-      if (error) throw error;
-
-      setRecurringRules((prev) => [data, ...prev]);
-      setNewRecurring((prev) => ({
-        ...prev,
-        description: "",
-        amount: "",
-        dayOfMonth: 1,
-      }));
-    } catch (e) {
-      console.error("[db] addRecurringRule failed", e);
-      alert("Could not add recurring rule. Check console for details.");
-    }
-  };
+  // PUT BACK ADD RECURRING RULE HERE IF NEEDED
 
 const startEditBudget = (b) => {
     setEditingBudgetId(b.id);
@@ -1362,13 +1345,7 @@ const startEditBudget = (b) => {
     cancelEditLiability();
   };
 
-    setTransactions((prev) =>
-      prev.map((t) => (t.id === editingTransactionId ? updated : t))
-    );
-
-    setEditingTransactionId(null);
-    setEditTransactionDraft(null);
-  };
+  
 
   // ---------------------------------------------------------------------------
   // Clear all

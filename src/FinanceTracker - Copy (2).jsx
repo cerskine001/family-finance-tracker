@@ -1039,20 +1039,24 @@ useEffect(() => {
     });
   };
 
-  // ---------------------------------------------------------------------------
-  // Recurring transaction helpers (monthly)
-  // ---------------------------------------------------------------------------
-  const addRecurringRule = async () => {
-    if (!newRecurring.description || !newRecurring.amount) return;
+const addRecurringRule = async () => {
+    if (!session?.user?.id || !householdId) return;
 
+    const description = newRecurring.description?.trim();
     const amountNum = Number(newRecurring.amount);
-	if (!Number.isFinite(amountNum)) {
-  	alert("Please enter a valid amount.");
-  	return;
-	}
 
-    const draft = {
-      description: newRecurring.description.trim(),
+    if (!description) {
+      alert("Please enter a description for the recurring item.");
+      return;
+    }
+    if (!Number.isFinite(amountNum)) {
+      alert("Please enter a valid amount.");
+      return;
+    }
+
+    const payload = {
+      household_id: householdId,
+      description,
       category: newRecurring.category,
       amount: amountNum,
       type: newRecurring.type,
@@ -1062,50 +1066,34 @@ useEffect(() => {
       start_date: null,
       end_date: null,
       active: true,
+      created_by: session.user.id,
     };
 
-    // If DB is enabled, persist first (so it shows for both users)
-    if (canViewData && householdId && session?.user?.id) {
+    try {
       const { data, error } = await supabase
         .from("recurring_rules")
-        .insert([
-          {
-            household_id: householdId,
-            created_by: session.user.id,
-            ...draft,
-          },
-        ])
+        .insert(payload)
         .select("*")
         .single();
 
-      if (error) {
-        console.error("[db] addRecurringRule failed", error);
-        alert("Could not add recurring rule. Please try again.");
-        return;
-      }
+      if (error) throw error;
 
       setRecurringRules((prev) => [data, ...prev]);
-    } else {
-      // Local-only fallback
-      setRecurringRules((prev) => [
+      setNewRecurring((prev) => ({
         ...prev,
-        {
-          ...draft,
-          id: Date.now(),
-        },
-      ]);
+        description: "",
+        amount: "",
+        dayOfMonth: 1,
+      }));
+    } catch (e) {
+      console.error("[db] addRecurringRule failed", e);
+      alert("Could not add recurring rule. Check console for details.");
     }
-
-    setNewRecurring({
-      description: "",
-      category: "Food",
-      amount: "",
-      type: "expense",
-      person: "joint",
-      dayOfMonth: 1,
-    });
   };
 
+  // ---------------------------------------------------------------------------
+  // Recurring transaction helpers (monthly)
+  // ---------------------------------------------------------------------------
   const deleteRecurringRule = (id) => {
     setRecurringRules((prev) => prev.filter((r) => r.id !== id));
   };
@@ -1131,8 +1119,7 @@ useEffect(() => {
   setUserToggledBudgets((prev) => ({ ...prev, [budgetId]: true }));
 };
 
-
-  const applyRecurringForCurrentMonth = async () => {
+  const applyRecurringForCurrentMonth = () => {
     if (!recurringRules.length) {
       alert("No recurring transactions defined yet.");
       return;
@@ -1141,78 +1128,44 @@ useEffect(() => {
     const [year, month] = currentMonth.split("-");
     const pad2 = (n) => String(n).padStart(2, "0");
 
-    // Build a quick set of existing "fingerprints" so we don't double-add
-    const existingKeys = new Set(
-      transactions.map((t) => `${t.date}|${t.description}|${t.amount}|${t.type}|${t.category}|${t.person}`)
-    );
-
-    const drafts = [];
+    const newTxns = [];
 
     recurringRules.forEach((rule, idx) => {
       if (!rule.active) return;
 
-      const safeDay = Math.min(Math.max(rule.dayOfMonth || rule.day_of_month || 1, 1), 31);
+      const safeDay = Math.min(Math.max(rule.dayOfMonth || 1, 1), 31);
       const date = `${year}-${month}-${pad2(safeDay)}`;
 
-      const description = String(rule.description || "").trim();
-      const amount = Number(rule.amount) || 0;
-      const type = rule.type || "expense";
-      const category = rule.category || "Other";
-      const person = rule.person || "joint";
+      const exists = transactions.some(
+        (t) =>
+          t.date === date &&
+          t.description === rule.description &&
+          t.amount === rule.amount &&
+          t.type === rule.type &&
+          t.person === rule.person
+      );
 
-      const key = `${date}|${description}|${amount}|${type}|${category}|${person}`;
-      if (existingKeys.has(key)) return;
-
-      drafts.push({ date, description, amount, type, category, person, _clientTemp: `rec-${currentMonth}-${idx}-${Date.now()}` });
-      existingKeys.add(key);
+      if (!exists) {
+        newTxns.push({
+          id: Date.now() + idx,
+          date,
+          description: rule.description,
+          category: rule.category,
+          amount: rule.amount,
+          type: rule.type,
+          person: rule.person,
+        });
+      }
     });
 
-    if (!drafts.length) {
+    if (!newTxns.length) {
       alert(`No new recurring transactions to add for ${currentMonth}. They may already exist.`);
       return;
     }
 
-    // Persist if DB is enabled; otherwise local-only
-    if (canViewData && householdId && session?.user?.id) {
-      const rows = drafts.map((d) => ({
-        household_id: householdId,
-        created_by: session.user.id,
-        date: d.date,
-        description: d.description,
-        amount: d.amount,
-        type: d.type,
-        category: d.category,
-        person: d.person,
-      }));
-
-      const { data, error } = await supabase.from("transactions").insert(rows).select();
-
-      if (error) {
-        console.error("[db] applyRecurringForCurrentMonth failed", error);
-        alert("Could not apply recurring transactions. Please try again.");
-        return;
-      }
-
-      setTransactions((prev) => [...prev, ...(data || [])]);
-    } else {
-      setTransactions((prev) => [
-        ...prev,
-        ...drafts.map((d) => ({
-          id: d._clientTemp,
-          date: d.date,
-          description: d.description,
-          category: d.category,
-          amount: d.amount,
-          type: d.type,
-          person: d.person,
-        })),
-      ]);
-    }
-
-    alert(`Added ${drafts.length} recurring transaction(s) for ${currentMonth}.`);
+    setTransactions((prev) => [...prev, ...newTxns]);
+    alert(`Added ${newTxns.length} recurring transaction(s) for ${currentMonth}.`);
   };
-
-  
 
   // ---------------------------------------------------------------------------
   // Delete functions (DB-aware)
@@ -1265,57 +1218,28 @@ useEffect(() => {
     setEditTransactionDraft(null);
   };
 
-  const saveEditTransaction = async () => {
+  const saveEditTransaction = () => {
     if (!editTransactionDraft || editingTransactionId == null) return;
 
     const updated = {
       ...editTransactionDraft,
       amount: parseFloat(editTransactionDraft.amount) || 0,
     };
-
-    // Optimistic UI update
-    setTransactions((prev) =>
-      prev.map((t) => (t.id === editingTransactionId ? { ...t, ...updated } : t))
+  setTransactions((prev) =>
+      prev.map((t) => (t.id === editingTransactionId ? updated : t))
     );
+
     setEditingTransactionId(null);
     setEditTransactionDraft(null);
-
-    // Persist (if DB is enabled)
-    if (canViewData && householdId) {
-      const { error } = await supabase
-        .from("transactions")
-        .update({
-          date: updated.date,
-          description: updated.description,
-          amount: updated.amount,
-          type: updated.type,
-          category: updated.category,
-          person: updated.person,
-        })
-        .eq("id", editingTransactionId)
-        .eq("household_id", householdId);
-
-      if (error) {
-        console.error("[db] saveEditTransaction failed", error);
-        alert("Could not save transaction edit. Please try again.");
-        // best-effort refresh
-        try {
-          const { data } = await supabase
-            .from("transactions")
-            .select("*")
-            .eq("household_id", householdId)
-            .order("date", { ascending: false });
-          if (data) setTransactions(data);
-        } catch {}
-      }
-    }
   };
 
   // ---------------------------------------------------------------------------
   // Edit helpers (Budgets / Assets / Liabilities)
   // ---------------------------------------------------------------------------
   
-  const startEditBudget = (b) => {
+  // PUT BACK ADD RECURRING RULE HERE IF NEEDED
+
+const startEditBudget = (b) => {
     setEditingBudgetId(b.id);
     setEditBudgetDraft({ ...b, amount: String(b.amount ?? "") });
   };
@@ -1421,13 +1345,7 @@ useEffect(() => {
     cancelEditLiability();
   };
 
-    setTransactions((prev) =>
-      prev.map((t) => (t.id === editingTransactionId ? updated : t))
-    );
-
-    setEditingTransactionId(null);
-    setEditTransactionDraft(null);
-  };
+  
 
   // ---------------------------------------------------------------------------
   // Clear all
