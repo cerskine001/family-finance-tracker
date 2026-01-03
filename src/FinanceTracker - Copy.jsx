@@ -1296,7 +1296,7 @@ const startEditBudget = (b) => {
       const payload = {
         category: updated.category,
         amount: updated.amount,
-        month: updated.month,
+        month: monthToDb(updated.month),
         person: updated.person,
       };
 
@@ -1310,7 +1310,14 @@ const startEditBudget = (b) => {
 
       if (error) return alert(error.message);
 
-      setBudgets((prev) => prev.map((b) => (b.id === editingBudgetId ? { ...data, amount: Number(data.amount) } : b)));
+      setBudgets((prev) =>
+  	prev.map((b) =>
+    	b.id === editingBudgetId
+      ? { ...data, amount: Number(data.amount), month: toMonthKey(data.month) }
+      : b
+  	)
+      );
+
     } else {
       setBudgets((prev) => prev.map((b) => (b.id === editingBudgetId ? updated : b)));
     }
