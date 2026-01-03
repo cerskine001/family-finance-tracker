@@ -1,9 +1,9 @@
 cd C:\dev\family-finance
 git add .
-git commit -m "Persistent Load fixes"
+git commit -m "Add Recurring Rule fixes"
 git push
 
 vercel dev
 vercel --prod
 
-
+npm run dev
