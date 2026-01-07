@@ -36,6 +36,17 @@ import TransactionCsvImport from "./components/TransactionCsvImport";
 import AuthModal from "./components/AuthModal";
 import HouseholdGate from "./components/HouseholdGate";
 import InviteMember from "./components/InviteMember";
+import { startEditBudget as startEditBudgetHelper, cancelEditBudget as cancelEditBudgetHelper, saveEditBudget as saveEditBudgetHelper } from "./helpers/budgetHelpers";
+import {
+  startEditLiabilityHelper,
+  cancelEditLiabilityHelper,
+  saveEditLiabilityHelper,
+} from "./helpers/liabilityHelpers";
+import {
+  startEditAssetHelper,
+  cancelEditAssetHelper,
+  saveEditAssetHelper,
+} from "./helpers/assetHelpers";
 
 // -----------------------------------------------------------------------------
 // Simple storage helper
@@ -241,26 +252,6 @@ const [showAllBudgetTxns, setShowAllBudgetTxns] = useState({});
 
 const [isOwner, setIsOwner] = useState(false);
 
-useEffect(() => {
-  if (!session?.user?.id || !householdId) {
-    setIsOwner(false);
-    return;
-  }
-
-  (async () => {
-    const { data, error } = await supabase
-      .from("household_members")
-      .select("role")
-      .eq("user_id", session.user.id)
-      .eq("household_id", householdId)
-      .maybeSingle();
-
-    if (!error) {
-      setIsOwner(data?.role === "owner");
-    }
-  })();
-}, [session?.user?.id, householdId]);
-
 
   const categories = [
     "Food",
@@ -272,6 +263,7 @@ useEffect(() => {
     "Shopping",
     "Other",
   ];
+
  // Budget categories use the same category list
  const budgetCategories = categories;
 
@@ -304,36 +296,57 @@ useEffect(() => {
 
 
   useEffect(() => {
-    if (!session?.user?.id) return;
+  if (!session?.user?.id) return;
 
-    // After login, check if user belongs to a household
-    (async () => {
-      const { data, error } = await supabase
-        .from("household_members")
-        .select("household_id")
-        .eq("user_id", session.user.id)
-        .limit(1)
-        .maybeSingle();
+  let cancelled = false;
 
-      if (error) {
-        console.error(error);
-        setHouseholdId(null);
-        setHouseholdGateOpen(true);
-        return;
-      }
+  (async () => {
+    const { data, error } = await supabase
+      .from("household_members")
+      .select("household_id, role")
+      .eq("user_id", session.user.id)
+      .limit(1)
+      .maybeSingle();
 
-      if (data?.household_id) {
-        setHouseholdId(data.household_id);
-        setHouseholdGateOpen(false);
-      } else {
-        setHouseholdId(null);
-        setHouseholdGateOpen(true);
-      }
-    })();
-  }, [session?.user?.id]);
+    if (cancelled) return;
+
+    if (error) {
+      console.error("[household_members] lookup failed", error);
+      setHouseholdId(null);
+      setHouseholdGateOpen(true);
+      setIsOwner(false);
+      return;
+    }
+
+    if (data?.household_id) {
+      setHouseholdId(data.household_id);
+      setHouseholdGateOpen(false);
+      setIsOwner((data?.role || "").toLowerCase() === "owner");
+    } else {
+      setHouseholdId(null);
+      setHouseholdGateOpen(true);
+      setIsOwner(false);
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+  };
+}, [session?.user?.id]);
 
   const isAuthed = !!session?.user?.id;
   const canViewData = isAuthed && !!householdId;
+
+  useEffect(() => {
+  console.log("[hh:snapshot]", {
+    authed: !!session?.user?.id,
+    userId: session?.user?.id,
+    householdId,
+    isOwner,
+    householdGateOpen,
+    canViewData,
+  });
+}, [session?.user?.id, householdId, isOwner, householdGateOpen, canViewData]);
 
   // ---------------------------------------------------------------------------
   // Load data (Supabase when authed+in household; otherwise local demo defaults)
@@ -1274,122 +1287,73 @@ const addRecurringRule = async () => {
   // Edit helpers (Budgets / Assets / Liabilities)
   // ---------------------------------------------------------------------------
   
-  // PUT BACK ADD RECURRING RULE HERE IF NEEDED
+const startEditBudget = (b) =>
+  startEditBudgetHelper(b, { setEditingBudgetId, setEditBudgetDraft });
 
-const startEditBudget = (b) => {
-    setEditingBudgetId(b.id);
-    setEditBudgetDraft({ ...b, amount: String(b.amount ?? "") });
-  };
-  const cancelEditBudget = () => {
-    setEditingBudgetId(null);
-    setEditBudgetDraft(null);
-  };
-  const saveEditBudget = async () => {
-    if (!editBudgetDraft || editingBudgetId == null) return;
+const cancelEditBudget = () =>
+  cancelEditBudgetHelper({ setEditingBudgetId, setEditBudgetDraft });
 
-    const updated = {
-      ...editBudgetDraft,
-      amount: parseFloat(editBudgetDraft.amount || "0"),
-    };
+const saveEditBudget = async () => {
+  await saveEditBudgetHelper({
+    editBudgetDraft,
+    editingBudgetId,
+    canViewData,
+    householdId,
+    supabase,
+    monthToDb,
+    toMonthKey,
+    setBudgets,
+    cancelEditBudget,
+  });
+};
 
-    if (canViewData) {
-      const payload = {
-        category: updated.category,
-        amount: updated.amount,
-        month: monthToDb(updated.month),
-        person: updated.person,
-      };
+  const startEditLiability = (l) =>
+  startEditLiabilityHelper({
+    l,
+    setEditingLiabilityId,
+    setEditLiabilityDraft,
+  });
 
-      const { data, error } = await supabase
-        .from("budgets")
-        .update(payload)
-        .eq("id", editingBudgetId)
-        .eq("household_id", householdId)
-        .select("*")
-        .single();
+const cancelEditLiability = () =>
+  cancelEditLiabilityHelper({
+    setEditingLiabilityId,
+    setEditLiabilityDraft,
+  });
 
-      if (error) return alert(error.message);
+  const saveEditLiability = async () =>
+  saveEditLiabilityHelper({
+    editLiabilityDraft,
+    editingLiabilityId,
+    canViewData,
+    householdId,
+    supabase,
+    setLiabilities,
+    cancelEditLiability, // important: pass the wrapper
+  });
 
-      setBudgets((prev) =>
-  	prev.map((b) =>
-    	b.id === editingBudgetId
-      ? { ...data, amount: Number(data.amount), month: toMonthKey(data.month) }
-      : b
-  	)
-      );
+  const startEditAsset = (a) =>
+  startEditAssetHelper({
+    a,
+    setEditingAssetId,
+    setEditAssetDraft,
+  });
 
-    } else {
-      setBudgets((prev) => prev.map((b) => (b.id === editingBudgetId ? updated : b)));
-    }
+const cancelEditAsset = () =>
+  cancelEditAssetHelper({
+    setEditingAssetId,
+    setEditAssetDraft,
+  });
 
-    cancelEditBudget();
-  };
-
-  const startEditAsset = (a) => {
-    setEditingAssetId(a.id);
-    setEditAssetDraft({ ...a, value: String(a.value ?? "") });
-  };
-  const cancelEditAsset = () => {
-    setEditingAssetId(null);
-    setEditAssetDraft(null);
-  };
-  const saveEditAsset = async () => {
-    if (!editAssetDraft || editingAssetId == null) return;
-
-    const updated = { ...editAssetDraft, value: parseFloat(editAssetDraft.value || "0") };
-
-    if (canViewData) {
-      const payload = { name: updated.name, value: updated.value, person: updated.person };
-      const { data, error } = await supabase
-        .from("assets")
-        .update(payload)
-        .eq("id", editingAssetId)
-        .eq("household_id", householdId)
-        .select("*")
-        .single();
-      if (error) return alert(error.message);
-
-      setAssets((prev) => prev.map((a) => (a.id === editingAssetId ? { ...data, value: Number(data.value) } : a)));
-    } else {
-      setAssets((prev) => prev.map((a) => (a.id === editingAssetId ? updated : a)));
-    }
-
-    cancelEditAsset();
-  };
-
-  const startEditLiability = (l) => {
-    setEditingLiabilityId(l.id);
-    setEditLiabilityDraft({ ...l, value: String(l.value ?? "") });
-  };
-  const cancelEditLiability = () => {
-    setEditingLiabilityId(null);
-    setEditLiabilityDraft(null);
-  };
-  const saveEditLiability = async () => {
-    if (!editLiabilityDraft || editingLiabilityId == null) return;
-
-    const updated = { ...editLiabilityDraft, value: parseFloat(editLiabilityDraft.value || "0") };
-
-    if (canViewData) {
-      const payload = { name: updated.name, value: updated.value, person: updated.person };
-      const { data, error } = await supabase
-        .from("liabilities")
-        .update(payload)
-        .eq("id", editingLiabilityId)
-        .eq("household_id", householdId)
-        .select("*")
-        .single();
-      if (error) return alert(error.message);
-
-      setLiabilities((prev) => prev.map((x) => (x.id === editingLiabilityId ? { ...data, value: Number(data.value) } : x)));
-    } else {
-      setLiabilities((prev) => prev.map((x) => (x.id === editingLiabilityId ? updated : x)));
-    }
-
-    cancelEditLiability();
-  };
-
-  
+const saveEditAsset = async () =>
+  saveEditAssetHelper({
+    editAssetDraft,
+    editingAssetId,
+    canViewData,
+    householdId,
+    supabase,
+    setAssets,
+    cancelEditAsset, // important: pass the wrapper
+  });
 
   // ---------------------------------------------------------------------------
   // Clear all
@@ -1478,9 +1442,10 @@ const startEditBudget = (b) => {
     <div className={canViewData ? "" : "pointer-events-none blur-sm select-none"}>
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
 	 {/* Owner-only tools */}
-    	{isOwner && canViewData && (
-      		<InviteMember session={session} />
-    	)}
+  	{isOwner && canViewData && (
+  		<InviteMember session={session} householdId={householdId} />
+	)}
+
       <div className="max-w-7xl mx-auto">
         <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
           <div className="flex justify-between items-center mb-4">
@@ -2792,7 +2757,7 @@ const startEditBudget = (b) => {
                             </button>
                             <button
                               type="button"
-                              onClick={cancelEditBudget}
+                              onClick={() => cancelEditBudget({ setEditingBudgetId, setEditBudgetDraft })}
                               className="text-gray-500 hover:text-gray-700"
                               title="Cancel"
                             >
@@ -2803,7 +2768,7 @@ const startEditBudget = (b) => {
                           <>
                             <button
                               type="button"
-                              onClick={() => startEditBudget(b)}
+                              onClick={() => startEditBudget(b, { setEditingBudgetId, setEditBudgetDraft })}
                               className="text-gray-600 hover:text-gray-800"
                               title="Edit budget"
                             >

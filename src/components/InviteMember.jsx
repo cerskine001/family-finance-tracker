@@ -6,64 +6,41 @@ export default function InviteMember({ session, householdId }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
-  const invite = async () => {
-    setMsg(null);
-    setBusy(true);
+const invite = async (e) => {
+  e?.preventDefault?.();
+  e?.stopPropagation?.();
 
-    try {
-  	const token = session?.access_token;
+  console.log("[invite] clicked", { email, role, householdId });
 
-  	console.log("[invite] sending", {
-    	url: "/api/invite",
-    	hasToken: !!token,
-    	tokenPrefix: token?.slice(0, 10),
-  	});
+  setMsg(null);
+  setBusy(true);
 
-  	if (!token) {
-    	throw new Error("No access token found. Please sign in again.");
-  	}
+  try {
+    const token = session?.access_token;
+    if (!token) throw new Error("No access token found. Please sign in again.");
+    if (!householdId) throw new Error("No household selected. Please refresh or re-login.");
 
-  	const r = await fetch("/api/invite", {
-    	method: "POST",
-    	headers: {
-      	"Content-Type": "application/json",
-      	Authorization: `Bearer ${token}`,
-    	},
-    	body: JSON.stringify({ email, role, householdId, }),
-  	});
+    const r = await fetch("/api/invite", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ email, role, householdId }),
+    });
 
-      // Read body ONCE, then try to parse
-      const text = await r.text();
-      let data = null;
+    const text = await r.text();
+    if (!r.ok) throw new Error(text || `Invite failed (${r.status})`);
 
-      try {
-        data = text ? JSON.parse(text) : null;
-      } catch {
-        // Not JSON (could be HTML, plain text, etc.)
-        data = null;
-      }
+    setMsg("Invite sent ✅");
+  } catch (err) {
+    console.error("[invite] failed", err);
+    setMsg(err?.message || "Invite failed");
+  } finally {
+    setBusy(false);
+  }
+};
 
-      if (!r.ok) {
-  	const serverMsg =
-    	(data && (data.details
-      	? `${data.error || "Invite failed"}: ${data.details}`
-      	: (data.error || data.message))) ||
-    	(text && text.trim()) ||
-    	`Invite failed (${r.status})`;
-
-  	throw new Error(serverMsg);
-	}
-
-
-      setMsg("Invite sent! They’ll receive an email to set password and sign in.");
-      setEmail("");
-      setRole("member");
-    } catch (e) {
-      setMsg(e?.message || "Invite failed");
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <div className="border rounded-lg p-4 bg-indigo-50 space-y-2">
@@ -85,14 +62,18 @@ export default function InviteMember({ session, householdId }) {
           <option value="member">Member (full access)</option>
           <option value="owner">Owner (admin)</option>
         </select>
+	<div style={{ fontSize: 12, opacity: 0.8 }}>
+  	 debug: busy={String(busy)} email={String(!!email)} householdId={String(!!householdId)} 	token={String(!!session?.access_token)}
+	</div>
 
         <button
-          disabled={busy || !email}
-          onClick={invite}
-          className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 disabled:opacity-60"
-        >
-          {busy ? "Inviting..." : "Send invite"}
-        </button>
+  	 type="button"
+  	 disabled={busy || !email || !householdId}
+  	 onClick={invite}
+  	className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 disabled:opacity-60"
+	>
+  	 {busy ? "Sending..." : "Send invite"}
+	</button>
       </div>
 
       {msg && <div className="text-sm text-gray-700">{msg}</div>}

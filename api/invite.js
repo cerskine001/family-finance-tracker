@@ -1,4 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
+const supabaseAdmin = createClient(...)
+// outside export default
 
 export default async function handler(req, res) {
   res.setHeader("Content-Type", "application/json");
@@ -82,43 +84,106 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Only household owners can invite" });
     }
 
+    const normalizedEmail = String(email).trim().toLowerCase();
+
     // --- Invite or reset ---
-    const redirectTo = `${process.env.APP_URL}/accept-invite`;
+    const getBaseUrl = (req) => {
+  	if (process.env.APP_URL) return process.env.APP_URL;                // explicit wins
+  	if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`; // preview/prod on Vercel
+  	const host = req.headers["x-forwarded-host"] || req.headers.host;   // fallback
+  	const proto = req.headers["x-forwarded-proto"] || "http";
+  	return `${proto}://${host}`;                                        // last resort
+	};
 
-    const { data: inviteData, error: inviteErr } =
-      await supabaseAdmin.auth.admin.inviteUserByEmail(email, { redirectTo });
+	const redirectTo = `${getBaseUrl(req)}/accept-invite`;
 
-    if (inviteErr) {
-      const msg = (inviteErr.message || "").toLowerCase();
-      const looksLikeExists =
-        msg.includes("already") || msg.includes("exists") || msg.includes("registered");
 
-      if (!looksLikeExists) {
-        return res.status(400).json({
-          error: "Invite failed",
-          details: inviteErr.message,
-        });
-      }
+    	const { data: inviteData, error: inviteErr } =
+      	await supabaseAdmin.auth.admin.inviteUserByEmail(normalizedEmail, { redirectTo });
 
-      const { error: resetErr } = await supabaseAdmin.auth.resetPasswordForEmail(email, {
-        redirectTo,
-      });
+  if (inviteErr) {
+  const msg = (inviteErr.message || "").toLowerCase();
+  const looksLikeExists =
+    msg.includes("already") ||
+    msg.includes("exists") ||
+    msg.includes("registered");
 
-      if (resetErr) {
-        return res.status(400).json({
-          error: "User exists but password reset failed",
-          details: resetErr.message,
-        });
-      }
+  if (!looksLikeExists) {
+    return res.status(400).json({
+      error: "Invite failed",
+      details: inviteErr.message,
+    });
+  }
 
-      return res.status(200).json({
-        ok: true,
-        email,
-        householdId,
+  // 1️ Send password reset email
+  const { error: resetErr } =
+    await supabaseAdmin.auth.resetPasswordForEmail(normalizedEmail, { redirectTo });
+
+  if (resetErr) {
+    return res.status(400).json({
+      error: "User exists but password reset failed",
+      details: resetErr.message,
+    });
+  }
+
+  // 2️ Resolve existing user id
+  const { data: usersPage, error: listErr } =
+//    await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 200 });
+let found = null;
+for (let page = 1; page <= 10 && !found; page++) {
+  const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage: 200 });
+  if (error) throw error;
+  found = data?.users?.find(u => (u.email || "").toLowerCase() === normalizedEmail);
+}
+if (!found?.id) { ... }
+
+
+  if (listErr) {
+    return res.status(500).json({
+      error: "Could not list users",
+      details: listErr.message,
+    });
+  }
+
+  const matchUser = usersPage?.users?.find(
+    (u) => (u.email || "").toLowerCase() === normalizedEmail
+  );
+
+  if (!matchUser?.id) {
+    return res.status(500).json({
+      error: "User exists but could not resolve user id",
+    });
+  }
+
+  // 3️ ENSURE household membership
+  const { error: upsertErr } = await supabaseAdmin
+    .from("household_members")
+    .upsert(
+      {
+        household_id: householdId,
+        user_id: matchUser.id,
         role,
-        note: "User already exists — sent password reset email instead.",
-      });
-    }
+      },
+      { onConflict: "household_id,user_id" }
+    );
+
+  if (upsertErr) {
+    return res.status(500).json({
+      error: "Failed to add existing user to household",
+      details: upsertErr.message,
+    });
+  }
+
+  // 4️ Success
+  return res.status(200).json({
+    ok: true,
+    email,
+    householdId,
+    role,
+    note: "User already exists — reset email sent and membership ensured.",
+  });
+}
+
 
     const invitedUserId = inviteData?.user?.id;
     if (!invitedUserId) {
@@ -144,7 +209,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       invitedUserId,
-      email,
+      email:normalizedEmail,
       householdId,
       role,
     });
