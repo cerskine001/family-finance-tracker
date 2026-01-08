@@ -1134,86 +1134,53 @@ const addRecurringRule = async () => {
   setUserToggledBudgets((prev) => ({ ...prev, [budgetId]: true }));
 };
 
-const applyRecurringForCurrentMonth = async () => {
-  if (!recurringRules.length) {
-    alert("No recurring transactions defined yet.");
-    return;
-  }
-
-  const [year, month] = currentMonth.split("-");
-  const pad2 = (n) => String(n).padStart(2, "0");
-
-  const newTxns = [];
-
-  recurringRules.forEach((rule, idx) => {
-    if (!rule.active) return;
-
-    const safeDay = Math.min(Math.max(Number(rule.dayOfMonth) || 1, 1), 31);
-    const date = `${year}-${month}-${pad2(safeDay)}`;
-
-    const exists = transactions.some(
-      (t) =>
-        t.date === date &&
-        t.description === rule.description &&
-        Number(t.amount) === Number(rule.amount) &&
-        t.type === rule.type &&
-        t.person === rule.person
-    );
-
-    if (!exists) {
-      newTxns.push({
-        date,
-        description: rule.description,
-        category: rule.category,
-        amount: Number(rule.amount),
-        type: rule.type,
-        person: rule.person,
-      });
-    }
-  });
-
-  if (!newTxns.length) {
-    alert(`No new recurring transactions to add for ${currentMonth}. They may already exist.`);
-    return;
-  }
-
-  // ✅ Persist to DB when authed
-  if (canViewData && householdId && session?.user?.id) {
-    const payload = newTxns.map((t) => ({
-      household_id: householdId,
-      date: t.date,
-      description: t.description,
-      category: t.category,
-      amount: t.amount,
-      type: t.type,
-      person: t.person,
-      created_by: session.user.id,
-    }));
-
-    const { data, error } = await supabase
-      .from("transactions")
-      .insert(payload)
-      .select("*");
-
-    if (error) {
-      console.error("[db] applyRecurring failed", error);
-      alert(error.message || "Could not apply recurring items.");
+  const applyRecurringForCurrentMonth = () => {
+    if (!recurringRules.length) {
+      alert("No recurring transactions defined yet.");
       return;
     }
 
-    // Keep local state in sync with DB rows
-    const inserted = (data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
-    setTransactions((prev) => [...inserted, ...prev]); // prepend like addTransaction
-    alert(`Added ${inserted.length} recurring transaction(s) for ${currentMonth}.`);
-    return;
-  }
+    const [year, month] = currentMonth.split("-");
+    const pad2 = (n) => String(n).padStart(2, "0");
 
-  // Local-only fallback (demo mode)
-  const localRows = newTxns.map((t, idx) => ({ id: Date.now() + idx, ...t }));
-  setTransactions((prev) => [...prev, ...localRows]);
-  alert(`Added ${localRows.length} recurring transaction(s) for ${currentMonth}.`);
-};
+    const newTxns = [];
 
+    recurringRules.forEach((rule, idx) => {
+      if (!rule.active) return;
+
+      const safeDay = Math.min(Math.max(rule.dayOfMonth || 1, 1), 31);
+      const date = `${year}-${month}-${pad2(safeDay)}`;
+
+      const exists = transactions.some(
+        (t) =>
+          t.date === date &&
+          t.description === rule.description &&
+          t.amount === rule.amount &&
+          t.type === rule.type &&
+          t.person === rule.person
+      );
+
+      if (!exists) {
+        newTxns.push({
+          id: Date.now() + idx,
+          date,
+          description: rule.description,
+          category: rule.category,
+          amount: rule.amount,
+          type: rule.type,
+          person: rule.person,
+        });
+      }
+    });
+
+    if (!newTxns.length) {
+      alert(`No new recurring transactions to add for ${currentMonth}. They may already exist.`);
+      return;
+    }
+
+    setTransactions((prev) => [...prev, ...newTxns]);
+    alert(`Added ${newTxns.length} recurring transaction(s) for ${currentMonth}.`);
+  };
 
   // ---------------------------------------------------------------------------
   // Delete functions (DB-aware)
