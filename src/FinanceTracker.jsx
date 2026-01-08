@@ -196,7 +196,6 @@ const FinanceTracker = () => {
   const [householdId, setHouseholdId] = useState(null);
   const [householdGateOpen, setHouseholdGateOpen] = useState(false);
 
-
   // Form states
   const [newTransaction, setNewTransaction] = useState({
     date: new Date().toISOString().split("T")[0],
@@ -250,10 +249,15 @@ const FinanceTracker = () => {
   });
 
 // Budget: per-card "show all transactions" toggle
-const [showAllBudgetTxns, setShowAllBudgetTxns] = useState({});
+ const [showAllBudgetTxns, setShowAllBudgetTxns] = useState({});
 
-const [isOwner, setIsOwner] = useState(false);
+ const [isOwner, setIsOwner] = useState(false);
 
+ const [editingRuleId, setEditingRuleId] = useState(null);
+ const [editRuleDraft, setEditRuleDraft] = useState(null);
+ // Recurring rule editing state
+ const [editingRecurringRuleId, setEditingRecurringRuleId] = useState(null);
+ const [editRecurringDraft, setEditRecurringDraft] = useState(null);
 
   const categories = [
     "Food",
@@ -1328,7 +1332,7 @@ const applyRecurringForMonth = async (monthKey) => {
 
 
   // ---------------------------------------------------------------------------
-  // Edit helpers (Budgets / Assets / Liabilities)
+  // Edit helpers (Budgets / Assets / Liabilities/Recurring Rules)
   // ---------------------------------------------------------------------------
   
 const startEditBudget = (b) =>
@@ -1398,6 +1402,120 @@ const saveEditAsset = async () =>
     setAssets,
     cancelEditAsset, // important: pass the wrapper
   });
+ 
+  const startEditRecurringRule = (r) => {
+  setEditingRecurringRuleId(r.id);
+  setEditRecurringDraft({
+    description: r.description || "",
+    category: r.category || "Food",
+    amount: String(r.amount ?? ""),
+    type: r.type || "expense",
+    person: r.person || "joint",
+    dayOfMonth: String(r.dayOfMonth ?? 1),
+  });
+  };
+
+  const cancelEditRecurringRule = () => {
+  setEditingRecurringRuleId(null);
+  setEditRecurringDraft(null);
+  };
+
+  const saveEditRecurringRule = async () => {
+  if (!editRecurringDraft || !editingRecurringRuleId) return;
+
+  const updated = {
+    ...editRecurringDraft,
+    amount: Number(editRecurringDraft.amount || 0),
+    dayOfMonth: Math.min(Math.max(Number(editRecurringDraft.dayOfMonth) || 1, 1), 31),
+  };
+
+  // DB-aware update
+  if (canViewData && householdId) {
+    const payload = {
+      description: String(updated.description || "").trim(),
+      category: updated.category,
+      amount: updated.amount,
+      type: updated.type,
+      person: updated.person,
+      day_of_month: updated.dayOfMonth,
+    };
+
+    const { data, error } = await supabase
+      .from("recurring_rules")
+      .update(payload)
+      .eq("id", editingRecurringRuleId)
+      .eq("household_id", householdId)
+      .select("*")
+      .single();
+
+    if (error) {
+      alert(error.message);
+      return;
+    }
+
+    setRecurringRules((prev) =>
+      prev.map((x) =>
+        x.id === editingRecurringRuleId
+          ? {
+              ...x,
+              ...data,
+              dayOfMonth: data.day_of_month ?? x.dayOfMonth,
+            }
+          : x
+      )
+    );
+  } else {
+    // local fallback
+    setRecurringRules((prev) =>
+      prev.map((x) =>
+        x.id === editingRecurringRuleId
+          ? { ...x, ...updated, dayOfMonth: updated.dayOfMonth }
+          : x
+      )
+    );
+  }
+
+  cancelEditRecurringRule();
+};
+// Persist pause/resume
+const toggleRecurringActiveDb = async (rule) => {
+  const nextActive = !rule.active;
+
+  if (canViewData && householdId) {
+    const { error } = await supabase
+      .from("recurring_rules")
+      .update({ active: nextActive })
+      .eq("id", rule.id)
+      .eq("household_id", householdId);
+
+    if (error) {
+      alert(error.message);
+      return;
+    }
+  }
+
+  setRecurringRules((prev) =>
+    prev.map((r) => (r.id === rule.id ? { ...r, active: nextActive } : r))
+  );
+};
+
+// Persist delete
+const deleteRecurringRuleDb = async (id) => {
+  if (canViewData && householdId) {
+    const { error } = await supabase
+      .from("recurring_rules")
+      .delete()
+      .eq("id", id)
+      .eq("household_id", householdId);
+
+    if (error) {
+      alert(error.message);
+      return;
+    }
+  }
+
+  setRecurringRules((prev) => prev.filter((r) => r.id !== id));
+};
 
   // ---------------------------------------------------------------------------
   // Clear all
@@ -1908,48 +2026,194 @@ const saveEditAsset = async () =>
                       </tr>
                     </thead>
                     <tbody>
-                      {recurringRules.map((r) => (
-                        <tr key={r.id} className="border-b">
-                          <td className="px-3 py-2">{r.description}</td>
-                          <td className="px-3 py-2">{r.category}</td>
-                          <td className="px-3 py-2 text-right">
-                            ${Number(r.amount || 0).toLocaleString()}
-                          </td>
-                          <td className="px-3 py-2 capitalize">{r.type}</td>
-                          <td className="px-3 py-2">
-                            {personLabels[r.person] || r.person}
-                          </td>
-                          <td className="px-3 py-2">Every month on day {r.dayOfMonth}</td>
-                          <td className="px-3 py-2 text-center">
-                            <span
-                              className={`inline-flex px-2 py-1 rounded-full text-[11px] font-semibold ${
-                                r.active
-                                  ? "bg-green-100 text-green-700"
-                                  : "bg-gray-200 text-gray-600"
-                              }`}
-                            >
-                              {r.active ? "Active" : "Paused"}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-center">
-                            <div className="flex items-center justify-center gap-2">
-                              <button
-                                onClick={() => toggleRecurringActive(r.id)}
-                                className="text-indigo-600 hover:text-indigo-800"
-                              >
-                                {r.active ? "Pause" : "Resume"}
-                              </button>
-                              <button
-                                onClick={() => deleteRecurringRule(r.id)}
-                                className="text-red-600 hover:text-red-800"
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
+  {recurringRules.map((r) => {
+    const isEditing = editingRecurringRuleId === r.id;
+
+    return (
+      <tr key={r.id} className="border-b">
+        <td className="px-3 py-2">
+          {isEditing ? (
+            <input
+              value={editRecurringDraft?.description || ""}
+              onChange={(e) =>
+                setEditRecurringDraft((prev) => ({
+                  ...(prev || {}),
+                  description: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm w-full"
+            />
+          ) : (
+            r.description
+          )}
+        </td>
+
+        <td className="px-3 py-2">
+          {isEditing ? (
+            <select
+              value={editRecurringDraft?.category || "Food"}
+              onChange={(e) =>
+                setEditRecurringDraft((prev) => ({
+                  ...(prev || {}),
+                  category: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm w-full"
+            >
+              {categories.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          ) : (
+            r.category
+          )}
+        </td>
+
+        <td className="px-3 py-2 text-right">
+          {isEditing ? (
+            <input
+              type="number"
+              value={editRecurringDraft?.amount ?? ""}
+              onChange={(e) =>
+                setEditRecurringDraft((prev) => ({
+                  ...(prev || {}),
+                  amount: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm w-28 text-right"
+            />
+          ) : (
+            `$${Number(r.amount || 0).toLocaleString()}`
+          )}
+        </td>
+
+        <td className="px-3 py-2 capitalize">
+          {isEditing ? (
+            <select
+              value={editRecurringDraft?.type || "expense"}
+              onChange={(e) =>
+                setEditRecurringDraft((prev) => ({
+                  ...(prev || {}),
+                  type: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm"
+            >
+              <option value="income">Income</option>
+              <option value="expense">Expense</option>
+            </select>
+          ) : (
+            r.type
+          )}
+        </td>
+
+        <td className="px-3 py-2">
+          {isEditing ? (
+            <select
+              value={editRecurringDraft?.person || "joint"}
+              onChange={(e) =>
+                setEditRecurringDraft((prev) => ({
+                  ...(prev || {}),
+                  person: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm"
+            >
+              <option value="joint">Joint</option>
+              <option value="you">You</option>
+              <option value="wife">Wife</option>
+            </select>
+          ) : (
+            personLabels[r.person] || r.person
+          )}
+        </td>
+
+        <td className="px-3 py-2">
+          {isEditing ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500">Every month on day</span>
+              <input
+                type="number"
+                min={1}
+                max={31}
+                value={editRecurringDraft?.dayOfMonth ?? 1}
+                onChange={(e) =>
+                  setEditRecurringDraft((prev) => ({
+                    ...(prev || {}),
+                    dayOfMonth: e.target.value,
+                  }))
+                }
+                className="border rounded px-2 py-1 text-sm w-16"
+              />
+            </div>
+          ) : (
+            <>Every month on day {r.dayOfMonth}</>
+          )}
+        </td>
+
+        <td className="px-3 py-2 text-center">
+          <span
+            className={`inline-flex px-2 py-1 rounded-full text-[11px] font-semibold ${
+              r.active ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-600"
+            }`}
+          >
+            {r.active ? "Active" : "Paused"}
+          </span>
+        </td>
+
+        <td className="px-3 py-2 text-center">
+          {isEditing ? (
+            <div className="flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={saveEditRecurringRule}
+                className="text-indigo-600 hover:text-indigo-800"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={cancelEditRecurringRule}
+                className="text-gray-600 hover:text-gray-800"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => startEditRecurringRule(r)}
+                className="text-indigo-600 hover:text-indigo-800"
+              >
+                Edit
+              </button>
+
+              <button
+                type="button"
+                onClick={() => toggleRecurringActiveDb(r)}
+                className="text-indigo-600 hover:text-indigo-800"
+              >
+                {r.active ? "Pause" : "Resume"}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => deleteRecurringRuleDb(r.id)}
+                className="text-red-600 hover:text-red-800"
+              >
+                Delete
+              </button>
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+  })}
+</tbody>
+
                   </table>
                 </div>
               )}
