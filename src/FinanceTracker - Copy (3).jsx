@@ -259,8 +259,6 @@ const FinanceTracker = () => {
  // Recurring rule editing state
  const [editingRecurringRuleId, setEditingRecurringRuleId] = useState(null);
  const [editRecurringDraft, setEditRecurringDraft] = useState(null);
- const [forecastOpen, setForecastOpen] = useState(false); // default collapsed
-
 
   const categories = [
     "Food",
@@ -1395,70 +1393,6 @@ const collapseAllMonths = () => {
   setOpenMonths(new Set());
 };
 
-//  ----------------------------------------------------------------------------
-//  Monthly summary cards at top
-//  ----------------------------------------------------------------------------
-const selectedMonth = applyMonth || currentMonth;
-
-const monthTotals = useMemo(() => {
-  if (!selectedMonth) return { income: 0, expenses: 0, net: 0 };
-
-  const monthTxns = (transactions || []).filter((t) => (t.date || "").startsWith(selectedMonth));
-
-  let income = 0;
-  let expenses = 0;
-
-  for (const t of monthTxns) {
-    const amt = Number(t.amount || 0);
-    if (t.type === "income") income += amt;
-    else expenses += amt;
-  }
-
-  return { income, expenses, net: income - expenses };
-}, [transactions, selectedMonth]);
-
-//   ---------------------------------------------------------------------------
-//   Forecast calculation (no DB calls)
-//   ---------------------------------------------------------------------------
-const addMonths = (yyyyMm, delta) => {
-  const [y, m] = yyyyMm.split("-").map(Number);
-  const d = new Date(y, (m - 1) + delta, 1);
-  const yy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${yy}-${mm}`;
-};
-
-const forecastRows = useMemo(() => {
-  const base = (applyMonth || currentMonth);
-  if (!base) return [];
-
-  const monthsAhead = 6; // change to 3 or 6
-  const rows = [];
-
-  for (let i = 0; i < monthsAhead; i++) {
-    const monthKey = addMonths(base, i);
-
-    let income = 0;
-    let expenses = 0;
-
-    for (const r of (recurringRules || [])) {
-      if (!r.active) continue;
-      const amt = Number(r.amount || 0);
-      if (r.type === "income") income += amt;
-      else expenses += amt;
-    }
-
-    rows.push({
-      monthKey,
-      income,
-      expenses,
-      net: income - expenses,
-    });
-  }
-
-  return rows;
-}, [recurringRules, applyMonth, currentMonth]);
-
 
   // ---------------------------------------------------------------------------
   // Edit helpers (Budgets / Assets / Liabilities/Recurring Rules)
@@ -1990,14 +1924,7 @@ const deleteRecurringRuleDb = async (id) => {
                     .map((t) => (
                       <div key={t.id} className="flex justify-between items-center">
                         <div>
-                          <div className="flex items-center gap-2">
-  			   <p className="font-medium">{t.description}</p>
-  			   {t.recurring_rule_id ? (
-    			   <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
-      				Recurring
-     			   </span>
-  			) : null}
-			</div>
+                          <p className="font-medium">{t.description}</p>
                           <p className="text-xs text-gray-500">
                             {t.date} • {personLabels[t.person]}
                           </p>
@@ -2426,110 +2353,6 @@ const deleteRecurringRuleDb = async (id) => {
               </button>
             </div>
 
-		{/* 📊 Monthly summary cards */}
-<div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
-  <div className="rounded-xl border bg-white p-4">
-    <div className="text-xs text-gray-500">Income</div>
-    <div className="text-2xl font-bold text-green-700">
-      ${monthTotals.income.toLocaleString()}
-    </div>
-  </div>
-
-  <div className="rounded-xl border bg-white p-4">
-    <div className="text-xs text-gray-500">Expenses</div>
-    <div className="text-2xl font-bold text-red-700">
-      ${monthTotals.expenses.toLocaleString()}
-    </div>
-  </div>
-
-  <div className="rounded-xl border bg-white p-4">
-    <div className="text-xs text-gray-500">Net</div>
-    <div
-      className={`text-2xl font-bold ${
-        monthTotals.net >= 0 ? "text-green-800" : "text-red-800"
-      }`}
-    >
-      {monthTotals.net >= 0 ? "+" : "-"}$
-      {Math.abs(monthTotals.net).toLocaleString()}
-    </div>
-  </div>
-</div>
-
-
-{/*    Forecast UI  */}
-{/* Forecast (collapsible) */}
-<div className="rounded-xl border bg-white mb-6">
-  <button
-    type="button"
-    onClick={() => setForecastOpen((v) => !v)}
-    className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 rounded-xl transition-colors"
-
-  >
-    <div className="flex items-center gap-2">
-      <span className="text-sm font-semibold">Forecast (next 6 months)</span>
-      <span className="text-xs text-gray-500">
-        {forecastRows?.length ? `${forecastRows.length} months` : ""}
-      </span>
-    </div>
-
-    <span
-  	className={`text-lg leading-none transition-transform ${
-    forecastOpen ? "rotate-90" : "rotate-0"
-  }`}
-    >
-   ▸
-   </span>
-
-  </button>
-
-  {forecastOpen ? (
-    <div className="px-4 pb-4">
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b bg-gray-50 text-left">
-              <th className="px-3 py-2">Month</th>
-              <th className="px-3 py-2 text-right">Income</th>
-              <th className="px-3 py-2 text-right">Expenses</th>
-              <th className="px-3 py-2 text-right">Net</th>
-            </tr>
-          </thead>
-          <tbody>
-            {forecastRows.map((r) => (
-              <tr key={r.monthKey} className="border-b">
-                <td className="px-3 py-2">{r.monthKey}</td>
-                <td className="px-3 py-2 text-right text-green-700">
-                  ${Number(r.income || 0).toLocaleString()}
-                </td>
-                <td className="px-3 py-2 text-right text-red-700">
-                  ${Number(r.expenses || 0).toLocaleString()}
-                </td>
-                <td
-                  className={`px-3 py-2 text-right font-semibold ${
-                    r.net >= 0 ? "text-green-800" : "text-red-800"
-                  }`}
-                >
-                  {r.net >= 0 ? "+" : "-"}${Math.abs(Number(r.net || 0)).toLocaleString()}
-                </td>
-              </tr>
-            ))}
-
-            {!forecastRows?.length ? (
-              <tr>
-                <td colSpan={4} className="px-3 py-4 text-center text-gray-500">
-                  No forecast available yet.
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  ) : null}
-</div>
-
-
-
             {/* Table filters */}
             <div className="flex flex-col md:flex-row gap-3 mb-4">
               <input
@@ -2661,18 +2484,7 @@ const deleteRecurringRuleDb = async (id) => {
                   className="border rounded px-2 py-1 text-sm w-full"
                 />
               ) : (
-  		<div className="flex items-center gap-2">
-    		 <span>{t.description}</span>
-    		 	{t.recurring_rule_id ? (
-      		 <span
-          	 className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700"
-        	 title={t.applied_month ? `Applied for ${t.applied_month}` : "Recurring"}
-      		 >
-        		Auto-applied
-      		</span>
-    		) : null}
-  		</div>
-		
+                t.description
               )}
             </td>
 
@@ -3485,17 +3297,9 @@ const deleteRecurringRuleDb = async (id) => {
       className="flex items-center justify-between text-xs"
     >
       <div className="min-w-0 pr-3">
-       <div className="flex items-center gap-2 min-w-0">
-  	<p className="truncate font-medium text-gray-800">
-    	{t.description || "Untitled"}
-  	</p>
-  	{t.recurring_rule_id ? (
-    	<span className="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
-      Recurring
-    	</span>
-  	) : null}
-	</div>
-
+        <p className="truncate font-medium text-gray-800">
+          {t.description || "Untitled"}
+        </p>
         <p className="text-[11px] text-gray-500">
           {t.date} • {personLabels[t.person] || t.person}
         </p>
