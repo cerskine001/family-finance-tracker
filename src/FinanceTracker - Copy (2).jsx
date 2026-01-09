@@ -195,7 +195,6 @@ const FinanceTracker = () => {
 
   const [householdId, setHouseholdId] = useState(null);
   const [householdGateOpen, setHouseholdGateOpen] = useState(false);
-  const [openMonths, setOpenMonths] = useState(() => new Set());
 
   // Form states
   const [newTransaction, setNewTransaction] = useState({
@@ -619,11 +618,6 @@ useEffect(() => {
 
     return Array.from(groups.values()).sort((a, b) => (a.key < b.key ? 1 : -1));
   }, [tableTransactions]);
-
-  useEffect(() => {
-  if (!currentMonth) return;
-  setOpenMonths(new Set([currentMonth]));
-}, [currentMonth]);
 
   // ---------------------------------------------------------------------------
   // Date range handling
@@ -1372,25 +1366,6 @@ useEffect(() => {
   // Close edit mode
   setEditingTransactionId(null);
   setEditTransactionDraft(null);
-};
-
-const isMonthOpen = (monthKey) => openMonths.has(monthKey);
-
-const toggleMonth = (monthKey) => {
-  setOpenMonths((prev) => {
-    const next = new Set(prev);
-    if (next.has(monthKey)) next.delete(monthKey);
-    else next.add(monthKey);
-    return next;
-  });
-};
-
-const expandAllMonths = () => {
-  setOpenMonths(new Set(groupedTransactionsByMonth.map((g) => g.monthKey)));
-};
-
-const collapseAllMonths = () => {
-  setOpenMonths(new Set());
 };
 
 
@@ -2402,223 +2377,198 @@ const deleteRecurringRuleDb = async (id) => {
 
                 <tbody>
                   {groupedTransactionsByMonth.map((group) => (
-<React.Fragment key={group.key}>
-  <tr className="bg-gray-100">
-    <td colSpan={2} className="px-4 py-2 font-semibold">
-      <button
-        type="button"
-        onClick={() => toggleMonth(group.key)}
-        className="flex items-center gap-2 text-left hover:text-indigo-700"
-        aria-expanded={isMonthOpen(group.key)}
-        aria-controls={`month-${group.key}`}
-      >
-        <span className="text-lg leading-none">
-          {isMonthOpen(group.key) ? "▾" : "▸"}
-        </span>
-        {group.label}
-      </button>
-    </td>
+                    <React.Fragment key={group.key}>
+                      <tr className="bg-gray-100">
+                        <td colSpan={2} className="px-4 py-2 font-semibold">
+                          {group.label}
+                        </td>
+                        <td className="px-4 py-2 text-xs text-gray-600">
+                          Income:{" "}
+                          <span className="text-green-600 font-semibold">
+                            +${group.income.toLocaleString()}
+                          </span>{" "}
+                          • Expenses:{" "}
+                          <span className="text-red-600 font-semibold">
+                            -${group.expenses.toLocaleString()}
+                          </span>{" "}
+                          • Net:{" "}
+                          <span
+                            className={`font-semibold ${
+                              group.net >= 0 ? "text-green-700" : "text-red-700"
+                            }`}
+                          >
+                            {group.net >= 0 ? "+" : "-"}$
+                            {Math.abs(group.net).toLocaleString()}
+                          </span>
+                        </td>
+                        <td colSpan={3}></td>
+                      </tr>
 
-    <td className="px-4 py-2 text-xs text-gray-600">
-      Income:{" "}
-      <span className="text-green-600 font-semibold">
-        +${group.income.toLocaleString()}
-      </span>{" "}
-      • Expenses:{" "}
-      <span className="text-red-600 font-semibold">
-        -${group.expenses.toLocaleString()}
-      </span>{" "}
-      • Net:{" "}
-      <span
-        className={`font-semibold ${
-          group.net >= 0 ? "text-green-700" : "text-red-700"
-        }`}
-      >
-        {group.net >= 0 ? "+" : "-"}${Math.abs(group.net).toLocaleString()}
-      </span>
-    </td>
+                      {group.items.map((t) => {
+                        const isEditing = t.id === editingTransactionId;
 
-    <td colSpan={3}></td>
-  </tr>
+                        return (
+                          <tr key={t.id} className="border-b hover:bg-gray-50">
+                            <td className="px-4 py-2">
+                              {isEditing ? (
+                                <input
+                                  type="date"
+                                  value={editTransactionDraft?.date || ""}
+                                  onChange={(e) =>
+                                    setEditTransactionDraft((prev) => ({
+                                      ...prev,
+                                      date: e.target.value,
+                                    }))
+                                  }
+                                  className="border rounded px-2 py-1 text-sm w-full"
+                                />
+                              ) : (
+                                t.date
+                              )}
+                            </td>
 
-  {isMonthOpen(group.key) && (
-    <React.Fragment>
-      {group.items.map((t) => {
-        const isEditing = t.id === editingTransactionId;
+                            <td className="px-4 py-2">
+                              {isEditing ? (
+                                <input
+                                  type="text"
+                                  value={editTransactionDraft?.description || ""}
+                                  onChange={(e) =>
+                                    setEditTransactionDraft((prev) => ({
+                                      ...prev,
+                                      description: e.target.value,
+                                    }))
+                                  }
+                                  className="border rounded px-2 py-1 text-sm w-full"
+                                />
+                              ) : (
+                                t.description
+                              )}
+                            </td>
 
-        return (
-          <tr
-            key={t.id}
-            id={`month-${group.key}`}
-            className="border-b hover:bg-gray-50"
-          >
-            <td className="px-4 py-2">
-              {isEditing ? (
-                <input
-                  type="date"
-                  value={editTransactionDraft?.date || ""}
-                  onChange={(e) =>
-                    setEditTransactionDraft((prev) => ({
-                      ...prev,
-                      date: e.target.value,
-                    }))
-                  }
-                  className="border rounded px-2 py-1 text-sm w-full"
-                />
-              ) : (
-                t.date
-              )}
-            </td>
+                            <td className="px-4 py-2">
+                              {isEditing ? (
+                                <select
+                                  value={editTransactionDraft?.category || "Other"}
+                                  onChange={(e) =>
+                                    setEditTransactionDraft((prev) => ({
+                                      ...prev,
+                                      category: e.target.value,
+                                    }))
+                                  }
+                                  className="border rounded px-2 py-1 text-sm w-full"
+                                >
+                                  {categories.map((cat) => (
+                                    <option key={cat} value={cat}>
+                                      {cat}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                t.category
+                              )}
+                            </td>
 
-            <td className="px-4 py-2">
-              {isEditing ? (
-                <input
-                  type="text"
-                  value={editTransactionDraft?.description || ""}
-                  onChange={(e) =>
-                    setEditTransactionDraft((prev) => ({
-                      ...prev,
-                      description: e.target.value,
-                    }))
-                  }
-                  className="border rounded px-2 py-1 text-sm w-full"
-                />
-              ) : (
-                t.description
-              )}
-            </td>
+                            <td className="px-4 py-2">
+                              {isEditing ? (
+                                <select
+                                  value={editTransactionDraft?.person || "joint"}
+                                  onChange={(e) =>
+                                    setEditTransactionDraft((prev) => ({
+                                      ...prev,
+                                      person: e.target.value,
+                                    }))
+                                  }
+                                  className="border rounded px-2 py-1 text-sm w-full"
+                                >
+                                  <option value="joint">Joint</option>
+                                  <option value="you">You</option>
+                                  <option value="wife">Wife</option>
+                                </select>
+                              ) : (
+                                personLabels[t.person]
+                              )}
+                            </td>
 
-            <td className="px-4 py-2">
-              {isEditing ? (
-                <select
-                  value={editTransactionDraft?.category || "Other"}
-                  onChange={(e) =>
-                    setEditTransactionDraft((prev) => ({
-                      ...prev,
-                      category: e.target.value,
-                    }))
-                  }
-                  className="border rounded px-2 py-1 text-sm w-full"
-                >
-                  {categories.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                t.category
-              )}
-            </td>
+                            <td
+                              className={`px-4 py-2 text-right font-bold ${
+                                t.type === "income" ? "text-green-600" : "text-red-600"
+                              }`}
+                            >
+                              {isEditing ? (
+                                <div className="flex items-center gap-2 justify-end">
+                                  <input
+                                    type="number"
+                                    value={editTransactionDraft?.amount || ""}
+                                    onChange={(e) =>
+                                      setEditTransactionDraft((prev) => ({
+                                        ...prev,
+                                        amount: e.target.value,
+                                      }))
+                                    }
+                                    className="border rounded px-2 py-1 text-sm w-24 text-right"
+                                  />
+                                  <select
+                                    value={editTransactionDraft?.type || "expense"}
+                                    onChange={(e) =>
+                                      setEditTransactionDraft((prev) => ({
+                                        ...prev,
+                                        type: e.target.value,
+                                      }))
+                                    }
+                                    className="border rounded px-2 py-1 text-xs"
+                                  >
+                                    <option value="income">Income</option>
+                                    <option value="expense">Expense</option>
+                                  </select>
+                                </div>
+                              ) : (
+                                <>
+                                  {t.type === "income" ? "+" : "-"}${t.amount}
+                                </>
+                              )}
+                            </td>
 
-            <td className="px-4 py-2">
-              {isEditing ? (
-                <select
-                  value={editTransactionDraft?.person || "joint"}
-                  onChange={(e) =>
-                    setEditTransactionDraft((prev) => ({
-                      ...prev,
-                      person: e.target.value,
-                    }))
-                  }
-                  className="border rounded px-2 py-1 text-sm w-full"
-                >
-                  <option value="joint">Joint</option>
-                  <option value="you">You</option>
-                  <option value="wife">Wife</option>
-                </select>
-              ) : (
-                personLabels[t.person] || t.person
-              )}
-            </td>
-
-            <td
-              className={`px-4 py-2 text-right font-bold ${
-                t.type === "income" ? "text-green-600" : "text-red-600"
-              }`}
-            >
-              {isEditing ? (
-                <div className="flex items-center gap-2 justify-end">
-                  <input
-                    type="number"
-                    value={editTransactionDraft?.amount || ""}
-                    onChange={(e) =>
-                      setEditTransactionDraft((prev) => ({
-                        ...prev,
-                        amount: e.target.value,
-                      }))
-                    }
-                    className="border rounded px-2 py-1 text-sm w-24 text-right"
-                  />
-                  <select
-                    value={editTransactionDraft?.type || "expense"}
-                    onChange={(e) =>
-                      setEditTransactionDraft((prev) => ({
-                        ...prev,
-                        type: e.target.value,
-                      }))
-                    }
-                    className="border rounded px-2 py-1 text-xs"
-                  >
-                    <option value="income">Income</option>
-                    <option value="expense">Expense</option>
-                  </select>
-                </div>
-              ) : (
-                <>
-                  {t.type === "income" ? "+" : "-"}${t.amount}
-                </>
-              )}
-            </td>
-
-            <td className="px-4 py-2 text-center">
-              {isEditing ? (
-                <div className="flex items-center justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={saveEditTransaction}
-                    className="text-green-600 hover:text-green-800"
-                    title="Save"
-                  >
-                    <Check size={18} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={cancelEditTransaction}
-                    className="text-gray-500 hover:text-gray-700"
-                    title="Cancel"
-                  >
-                    <X size={18} />
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => startEditTransaction(t)}
-                    className="text-indigo-600 hover:text-indigo-800"
-                    title="Edit"
-                  >
-                    <Pencil size={18} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => deleteTransaction(t.id)}
-                    className="text-red-600 hover:text-red-800"
-                    title="Delete"
-                  >
-                    <Trash2 size={18} />
-                  </button>
-                </div>
-              )}
-            </td>
-          </tr>
-        );
-      })}
-    </React.Fragment>
-  )}
-</React.Fragment>
-
+                            <td className="px-4 py-2 text-center">
+                              {isEditing ? (
+                                <div className="flex items-center justify-center gap-2">
+                                  <button
+                                    onClick={saveEditTransaction}
+                                    className="text-green-600 hover:text-green-800"
+                                    title="Save"
+                                  >
+                                    <Check size={18} />
+                                  </button>
+                                  <button
+                                    onClick={cancelEditTransaction}
+                                    className="text-gray-500 hover:text-gray-700"
+                                    title="Cancel"
+                                  >
+                                    <X size={18} />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center justify-center gap-2">
+                                  <button
+                                    onClick={() => startEditTransaction(t)}
+                                    className="text-indigo-600 hover:text-indigo-800"
+                                    title="Edit"
+                                  >
+                                    <Pencil size={18} />
+                                  </button>
+                                  <button
+                                    onClick={() => deleteTransaction(t.id)}
+                                    className="text-red-600 hover:text-red-800"
+                                    title="Delete"
+                                  >
+                                    <Trash2 size={18} />
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
                   ))}
 
                   {tableTransactions.length > 0 && (
