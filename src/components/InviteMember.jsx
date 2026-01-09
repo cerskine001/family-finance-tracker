@@ -62,9 +62,9 @@ const invite = async (e) => {
           <option value="member">Member (full access)</option>
           <option value="owner">Owner (admin)</option>
         </select>
-	<div style={{ fontSize: 12, opacity: 0.8 }}>
+	{/* <div style={{ fontSize: 12, opacity: 0.8 }}>
   	 debug: busy={String(busy)} email={String(!!email)} householdId={String(!!householdId)} 	token={String(!!session?.access_token)}
-	</div>
+	</div>   */}
 
         <button
   	 type="button"

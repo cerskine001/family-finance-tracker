@@ -1,6 +1,6 @@
 // FinanceTracker.jsx
 import { supabase } from "./supabaseClient";
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import {
   PlusCircle,
   Trash2,
@@ -195,6 +195,7 @@ const FinanceTracker = () => {
 
   const [householdId, setHouseholdId] = useState(null);
   const [householdGateOpen, setHouseholdGateOpen] = useState(false);
+  const [openMonths, setOpenMonths] = useState(() => new Set());
 
   // Form states
   const [newTransaction, setNewTransaction] = useState({
@@ -258,6 +259,8 @@ const FinanceTracker = () => {
  // Recurring rule editing state
  const [editingRecurringRuleId, setEditingRecurringRuleId] = useState(null);
  const [editRecurringDraft, setEditRecurringDraft] = useState(null);
+ const [forecastOpen, setForecastOpen] = useState(false); // default collapsed
+
 
   const categories = [
     "Food",
@@ -357,6 +360,12 @@ const FinanceTracker = () => {
 useEffect(() => {
   setApplyMonth(currentMonth);
 }, [currentMonth]);
+
+// Reset edit state when person filter changes
+useEffect(() => {
+  cancelEditRecurringRule();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [selectedPerson]);
 
   // ---------------------------------------------------------------------------
   // Load data (Supabase when authed+in household; otherwise local demo defaults)
@@ -544,6 +553,11 @@ useEffect(() => {
     [budgets, filterByPerson]
   );
 
+  const recurringRulesByPerson = useMemo(
+  () => filterByPerson(recurringRules),
+  [recurringRules, filterByPerson]
+);
+
   // Extra filtering for the Transactions table (search + category + type)
   const tableTransactions = useMemo(() => {
     let rows = [...transactionsByPerson];
@@ -618,6 +632,11 @@ useEffect(() => {
 
     return Array.from(groups.values()).sort((a, b) => (a.key < b.key ? 1 : -1));
   }, [tableTransactions]);
+
+  useEffect(() => {
+  if (!currentMonth) return;
+  setOpenMonths(new Set([currentMonth]));
+}, [currentMonth]);
 
   // ---------------------------------------------------------------------------
   // Date range handling
@@ -1144,29 +1163,29 @@ const addRecurringRule = async () => {
   setUserToggledBudgets((prev) => ({ ...prev, [budgetId]: true }));
 };
 
-const applyRecurringForMonth = async (monthKey) => {
-  if (!recurringRules.length) {
-    alert("No recurring transactions defined yet.");
-    return;
-  }
+const applyRecurringForMonth = async (monthKey, opts = {}) => {
+  const { silent = false } = opts;
 
-  if (!monthKey || !/^\d{4}-\d{2}$/.test(monthKey)) {
-    alert("Please pick a valid month (YYYY-MM).");
-    return;
-  }
+  const notify = (msg) => {
+    if (!silent) alert(msg);
+  };
+
+  if (!recurringRules?.length) return notify("No recurring transactions defined yet.");
+  if (!monthKey || !/^\d{4}-\d{2}$/.test(monthKey)) return notify("Pick a valid month.");
 
   const [year, month] = monthKey.split("-");
   const pad2 = (n) => String(n).padStart(2, "0");
 
   const newTxns = [];
 
-  recurringRules.forEach((rule) => {
+  recurringRulesByPerson.forEach((rule) => {
     if (!rule.active) return;
 
     const safeDay = Math.min(Math.max(Number(rule.dayOfMonth) || 1, 1), 31);
     const date = `${year}-${month}-${pad2(safeDay)}`;
 
-    const exists = transactions.some(
+    // Optional: keep legacy exists check (fine), but DB idempotency is the real guard
+    const exists = transactions?.some(
       (t) =>
         t.date === date &&
         t.description === rule.description &&
@@ -1183,16 +1202,18 @@ const applyRecurringForMonth = async (monthKey) => {
         amount: Number(rule.amount),
         type: rule.type,
         person: rule.person,
+        recurring_rule_id: rule.id,
       });
     }
   });
 
   if (!newTxns.length) {
-    alert(`No new recurring transactions to add for ${monthKey}. They may already exist.`);
-    return;
+    return notify(
+      `No new recurring transactions to add for ${monthKey}. They may already exist.`
+    );
   }
 
-  // ✅ Persist to DB (real behavior)
+  // ✅ Persist to DB
   if (canViewData && householdId && session?.user?.id) {
     const payload = newTxns.map((t) => ({
       household_id: householdId,
@@ -1203,30 +1224,66 @@ const applyRecurringForMonth = async (monthKey) => {
       type: t.type,
       person: t.person,
       created_by: session.user.id,
+
+      // idempotency tags
+      recurring_rule_id: t.recurring_rule_id,
+      applied_month: monthKey,
     }));
 
     const { data, error } = await supabase
       .from("transactions")
-      .insert(payload)
+      .upsert(payload, {
+        onConflict: "household_id,recurring_rule_id,applied_month",
+      })
       .select("*");
 
     if (error) {
       console.error("[db] applyRecurring failed", error);
-      alert(error.message || "Could not apply recurring items.");
-      return;
+      return notify(error.message || "Could not apply recurring items.");
     }
 
     const inserted = (data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
-    setTransactions((prev) => [...inserted, ...prev]); // prepend for visibility
-    alert(`Added ${inserted.length} recurring transaction(s) for ${monthKey}.`);
+    setTransactions((prev) => [...inserted, ...(prev ?? [])]);
+
+    notify(`Added ${inserted.length} recurring transaction(s) for ${monthKey}.`);
     return;
   }
 
-  // Local-only fallback (if not authed)
+  // Local-only fallback
   const localRows = newTxns.map((t, idx) => ({ id: Date.now() + idx, ...t }));
-  setTransactions((prev) => [...localRows, ...prev]);
-  alert(`Added ${localRows.length} recurring transaction(s) for ${monthKey}.`);
+  setTransactions((prev) => [...localRows, ...(prev ?? [])]);
+  notify(`Added ${localRows.length} recurring transaction(s) for ${monthKey}.`);
 };
+
+const autoApplyRecurringForMonth = async (monthKey) => {
+  if (!canViewData || !householdId || !session?.user?.id) return;
+  if (!recurringRules?.length) return;
+
+  await applyRecurringForMonth(monthKey, { silent: true, source: "auto" });
+};
+
+
+
+const autoAppliedRef = useRef(new Set());
+
+useEffect(() => {
+  if (!canViewData || !householdId || !applyMonth) return;
+  if (!recurringRules?.length) return;
+
+  const key = `${householdId}:${applyMonth}`;
+  if (autoAppliedRef.current.has(key)) return;
+
+  autoAppliedRef.current.add(key);
+
+  (async () => {
+    try {
+      await autoApplyRecurringForMonth(applyMonth);
+    } catch (e) {
+      console.error("[auto-apply] failed", e);
+      autoAppliedRef.current.delete(key);
+    }
+  })();
+}, [canViewData, householdId, applyMonth, recurringRules?.length]);
 
 
 
@@ -1329,6 +1386,101 @@ const applyRecurringForMonth = async (monthKey) => {
   setEditingTransactionId(null);
   setEditTransactionDraft(null);
 };
+
+const isMonthOpen = (monthKey) => openMonths.has(monthKey);
+
+const toggleMonth = (monthKey) => {
+  setOpenMonths((prev) => {
+    const next = new Set(prev);
+    if (next.has(monthKey)) next.delete(monthKey);
+    else next.add(monthKey);
+    return next;
+  });
+};
+
+const expandAllMonths = () => {
+  setOpenMonths(new Set(groupedTransactionsByMonth.map((g) => g.monthKey)));
+};
+
+const collapseAllMonths = () => {
+  setOpenMonths(new Set());
+};
+
+//  ----------------------------------------------------------------------------
+//  Monthly summary cards at top (respects selectedPerson)
+//  ----------------------------------------------------------------------------
+const selectedMonth = applyMonth || currentMonth;
+
+const monthTotals = useMemo(() => {
+  if (!selectedMonth) return { income: 0, expenses: 0, net: 0 };
+
+  const monthTxns = (transactionsByPerson || []).filter((t) =>
+    (t.date || "").startsWith(selectedMonth)
+  );
+
+  let income = 0;
+  let expenses = 0;
+
+  for (const t of monthTxns) {
+    const amt = Number(t.amount || 0);
+    if (t.type === "income") income += amt;
+    else expenses += amt;
+  }
+
+  return { income, expenses, net: income - expenses };
+}, [transactionsByPerson, selectedMonth]);
+
+
+//   ---------------------------------------------------------------------------
+//   Forecast calculation (no DB calls)
+//   ---------------------------------------------------------------------------
+const addMonths = (yyyyMm, delta) => {
+  const [y, m] = yyyyMm.split("-").map(Number);
+  const d = new Date(y, (m - 1) + delta, 1);
+  const yy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${yy}-${mm}`;
+};
+
+const forecastRows = useMemo(() => {
+  const base = (applyMonth || currentMonth);
+  if (!base) return [];
+
+  const monthsAhead = 6; // change to 3 or 6
+  const rows = [];
+
+  for (let i = 0; i < monthsAhead; i++) {
+    const monthKey = addMonths(base, i);
+
+    let income = 0;
+    let expenses = 0;
+
+    for (const r of (recurringRulesByPerson || [])) {
+      if (!r.active) continue;
+      const amt = Number(r.amount || 0);
+      if (r.type === "income") income += amt;
+      else expenses += amt;
+    }
+
+    rows.push({
+      monthKey,
+      income,
+      expenses,
+      net: income - expenses,
+    });
+
+    const monthTxns = transactionsByPerson.filter(
+  	(t) => t.date && t.date.startsWith(monthKey)
+	);
+
+	for (const t of monthTxns) {
+  		const amt = Number(t.amount || 0);
+  		if (t.type === "income") income += amt;
+  		else expenses += amt;
+	}
+  }
+  return rows;
+}, [recurringRulesByPerson, applyMonth, currentMonth]);
 
 
   // ---------------------------------------------------------------------------
@@ -1861,7 +2013,14 @@ const deleteRecurringRuleDb = async (id) => {
                     .map((t) => (
                       <div key={t.id} className="flex justify-between items-center">
                         <div>
-                          <p className="font-medium">{t.description}</p>
+                          <div className="flex items-center gap-2">
+  			   <p className="font-medium">{t.description}</p>
+  			   {t.recurring_rule_id ? (
+    			   <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
+      				Recurring
+     			   </span>
+  			) : null}
+			</div>
                           <p className="text-xs text-gray-500">
                             {t.date} • {personLabels[t.person]}
                           </p>
@@ -2012,6 +2171,16 @@ const deleteRecurringRuleDb = async (id) => {
                 <p className="text-xs text-gray-500">No recurring rules yet. Add one above.</p>
               ) : (
                 <div className="overflow-x-auto">
+
+		<div className="flex items-center justify-between mb-2">
+  		<span className="text-sm text-gray-600">
+    			Showing rules for:
+    		<span className="ml-1 font-semibold text-gray-900">
+      		{personLabels[selectedPerson] || selectedPerson}
+    		</span>
+  		</span>
+		</div>
+
                   <table className="w-full text-xs md:text-sm">
                     <thead className="bg-gray-100">
                       <tr>
@@ -2026,7 +2195,7 @@ const deleteRecurringRuleDb = async (id) => {
                       </tr>
                     </thead>
                     <tbody>
-  {recurringRules.map((r) => {
+  {recurringRulesByPerson.map((r) => {
     const isEditing = editingRecurringRuleId === r.id;
 
     return (
@@ -2290,6 +2459,110 @@ const deleteRecurringRuleDb = async (id) => {
               </button>
             </div>
 
+		{/* 📊 Monthly summary cards */}
+<div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+  <div className="rounded-xl border bg-white p-4">
+    <div className="text-xs text-gray-500">Income</div>
+    <div className="text-2xl font-bold text-green-700">
+      ${monthTotals.income.toLocaleString()}
+    </div>
+  </div>
+
+  <div className="rounded-xl border bg-white p-4">
+    <div className="text-xs text-gray-500">Expenses</div>
+    <div className="text-2xl font-bold text-red-700">
+      ${monthTotals.expenses.toLocaleString()}
+    </div>
+  </div>
+
+  <div className="rounded-xl border bg-white p-4">
+    <div className="text-xs text-gray-500">Net</div>
+    <div
+      className={`text-2xl font-bold ${
+        monthTotals.net >= 0 ? "text-green-800" : "text-red-800"
+      }`}
+    >
+      {monthTotals.net >= 0 ? "+" : "-"}$
+      {Math.abs(monthTotals.net).toLocaleString()}
+    </div>
+  </div>
+</div>
+
+
+{/*    Forecast UI  */}
+{/* Forecast (collapsible) */}
+<div className="rounded-xl border bg-white mb-6">
+  <button
+    type="button"
+    onClick={() => setForecastOpen((v) => !v)}
+    className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 rounded-xl transition-colors"
+
+  >
+    <div className="flex items-center gap-2">
+      <span className="text-sm font-semibold">Forecast (next 6 months)</span>
+      <span className="text-xs text-gray-500">
+        {forecastRows?.length ? `${forecastRows.length} months` : ""}
+      </span>
+    </div>
+
+    <span
+  	className={`text-lg leading-none transition-transform ${
+    forecastOpen ? "rotate-90" : "rotate-0"
+  }`}
+    >
+   ▸
+   </span>
+
+  </button>
+
+  {forecastOpen ? (
+    <div className="px-4 pb-4">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b bg-gray-50 text-left">
+              <th className="px-3 py-2">Month</th>
+              <th className="px-3 py-2 text-right">Income</th>
+              <th className="px-3 py-2 text-right">Expenses</th>
+              <th className="px-3 py-2 text-right">Net</th>
+            </tr>
+          </thead>
+          <tbody>
+            {forecastRows.map((r) => (
+              <tr key={r.monthKey} className="border-b">
+                <td className="px-3 py-2">{r.monthKey}</td>
+                <td className="px-3 py-2 text-right text-green-700">
+                  ${Number(r.income || 0).toLocaleString()}
+                </td>
+                <td className="px-3 py-2 text-right text-red-700">
+                  ${Number(r.expenses || 0).toLocaleString()}
+                </td>
+                <td
+                  className={`px-3 py-2 text-right font-semibold ${
+                    r.net >= 0 ? "text-green-800" : "text-red-800"
+                  }`}
+                >
+                  {r.net >= 0 ? "+" : "-"}${Math.abs(Number(r.net || 0)).toLocaleString()}
+                </td>
+              </tr>
+            ))}
+
+            {!forecastRows?.length ? (
+              <tr>
+                <td colSpan={4} className="px-3 py-4 text-center text-gray-500">
+                  No forecast available yet.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  ) : null}
+</div>
+
+
+
             {/* Table filters */}
             <div className="flex flex-col md:flex-row gap-3 mb-4">
               <input
@@ -2339,198 +2612,234 @@ const deleteRecurringRuleDb = async (id) => {
 
                 <tbody>
                   {groupedTransactionsByMonth.map((group) => (
-                    <React.Fragment key={group.key}>
-                      <tr className="bg-gray-100">
-                        <td colSpan={2} className="px-4 py-2 font-semibold">
-                          {group.label}
-                        </td>
-                        <td className="px-4 py-2 text-xs text-gray-600">
-                          Income:{" "}
-                          <span className="text-green-600 font-semibold">
-                            +${group.income.toLocaleString()}
-                          </span>{" "}
-                          • Expenses:{" "}
-                          <span className="text-red-600 font-semibold">
-                            -${group.expenses.toLocaleString()}
-                          </span>{" "}
-                          • Net:{" "}
-                          <span
-                            className={`font-semibold ${
-                              group.net >= 0 ? "text-green-700" : "text-red-700"
-                            }`}
-                          >
-                            {group.net >= 0 ? "+" : "-"}$
-                            {Math.abs(group.net).toLocaleString()}
-                          </span>
-                        </td>
-                        <td colSpan={3}></td>
-                      </tr>
+<React.Fragment key={group.key}>
+  <tr className="bg-gray-100">
+    <td colSpan={2} className="px-4 py-2 font-semibold">
+      <button
+        type="button"
+        onClick={() => toggleMonth(group.key)}
+        className="flex items-center gap-2 text-left hover:text-indigo-700"
+        aria-expanded={isMonthOpen(group.key)}
+        aria-controls={`month-${group.key}`}
+      >
+        <span className="text-lg leading-none">
+          {isMonthOpen(group.key) ? "▾" : "▸"}
+        </span>
+        {group.label}
+      </button>
+    </td>
 
-                      {group.items.map((t) => {
-                        const isEditing = t.id === editingTransactionId;
+    <td className="px-4 py-2 text-xs text-gray-600">
+      Income:{" "}
+      <span className="text-green-600 font-semibold">
+        +${group.income.toLocaleString()}
+      </span>{" "}
+      • Expenses:{" "}
+      <span className="text-red-600 font-semibold">
+        -${group.expenses.toLocaleString()}
+      </span>{" "}
+      • Net:{" "}
+      <span
+        className={`font-semibold ${
+          group.net >= 0 ? "text-green-700" : "text-red-700"
+        }`}
+      >
+        {group.net >= 0 ? "+" : "-"}${Math.abs(group.net).toLocaleString()}
+      </span>
+    </td>
 
-                        return (
-                          <tr key={t.id} className="border-b hover:bg-gray-50">
-                            <td className="px-4 py-2">
-                              {isEditing ? (
-                                <input
-                                  type="date"
-                                  value={editTransactionDraft?.date || ""}
-                                  onChange={(e) =>
-                                    setEditTransactionDraft((prev) => ({
-                                      ...prev,
-                                      date: e.target.value,
-                                    }))
-                                  }
-                                  className="border rounded px-2 py-1 text-sm w-full"
-                                />
-                              ) : (
-                                t.date
-                              )}
-                            </td>
+    <td colSpan={3}></td>
+  </tr>
 
-                            <td className="px-4 py-2">
-                              {isEditing ? (
-                                <input
-                                  type="text"
-                                  value={editTransactionDraft?.description || ""}
-                                  onChange={(e) =>
-                                    setEditTransactionDraft((prev) => ({
-                                      ...prev,
-                                      description: e.target.value,
-                                    }))
-                                  }
-                                  className="border rounded px-2 py-1 text-sm w-full"
-                                />
-                              ) : (
-                                t.description
-                              )}
-                            </td>
+  {isMonthOpen(group.key) && (
+    <React.Fragment>
+      {group.items.map((t) => {
+        const isEditing = t.id === editingTransactionId;
 
-                            <td className="px-4 py-2">
-                              {isEditing ? (
-                                <select
-                                  value={editTransactionDraft?.category || "Other"}
-                                  onChange={(e) =>
-                                    setEditTransactionDraft((prev) => ({
-                                      ...prev,
-                                      category: e.target.value,
-                                    }))
-                                  }
-                                  className="border rounded px-2 py-1 text-sm w-full"
-                                >
-                                  {categories.map((cat) => (
-                                    <option key={cat} value={cat}>
-                                      {cat}
-                                    </option>
-                                  ))}
-                                </select>
-                              ) : (
-                                t.category
-                              )}
-                            </td>
+        return (
+          <tr
+            key={t.id}
+            id={`month-${group.key}`}
+            className="border-b hover:bg-gray-50"
+          >
+            <td className="px-4 py-2">
+              {isEditing ? (
+                <input
+                  type="date"
+                  value={editTransactionDraft?.date || ""}
+                  onChange={(e) =>
+                    setEditTransactionDraft((prev) => ({
+                      ...prev,
+                      date: e.target.value,
+                    }))
+                  }
+                  className="border rounded px-2 py-1 text-sm w-full"
+                />
+              ) : (
+                t.date
+              )}
+            </td>
 
-                            <td className="px-4 py-2">
-                              {isEditing ? (
-                                <select
-                                  value={editTransactionDraft?.person || "joint"}
-                                  onChange={(e) =>
-                                    setEditTransactionDraft((prev) => ({
-                                      ...prev,
-                                      person: e.target.value,
-                                    }))
-                                  }
-                                  className="border rounded px-2 py-1 text-sm w-full"
-                                >
-                                  <option value="joint">Joint</option>
-                                  <option value="you">You</option>
-                                  <option value="wife">Wife</option>
-                                </select>
-                              ) : (
-                                personLabels[t.person]
-                              )}
-                            </td>
+            <td className="px-4 py-2">
+              {isEditing ? (
+                <input
+                  type="text"
+                  value={editTransactionDraft?.description || ""}
+                  onChange={(e) =>
+                    setEditTransactionDraft((prev) => ({
+                      ...prev,
+                      description: e.target.value,
+                    }))
+                  }
+                  className="border rounded px-2 py-1 text-sm w-full"
+                />
+              ) : (
+  		<div className="flex items-center gap-2">
+    		 <span>{t.description}</span>
+    		 	{t.recurring_rule_id ? (
+      		 <span
+          	 className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700"
+        	 title={t.applied_month ? `Applied for ${t.applied_month}` : "Recurring"}
+      		 >
+        		Auto-applied
+      		</span>
+    		) : null}
+  		</div>
+		
+              )}
+            </td>
 
-                            <td
-                              className={`px-4 py-2 text-right font-bold ${
-                                t.type === "income" ? "text-green-600" : "text-red-600"
-                              }`}
-                            >
-                              {isEditing ? (
-                                <div className="flex items-center gap-2 justify-end">
-                                  <input
-                                    type="number"
-                                    value={editTransactionDraft?.amount || ""}
-                                    onChange={(e) =>
-                                      setEditTransactionDraft((prev) => ({
-                                        ...prev,
-                                        amount: e.target.value,
-                                      }))
-                                    }
-                                    className="border rounded px-2 py-1 text-sm w-24 text-right"
-                                  />
-                                  <select
-                                    value={editTransactionDraft?.type || "expense"}
-                                    onChange={(e) =>
-                                      setEditTransactionDraft((prev) => ({
-                                        ...prev,
-                                        type: e.target.value,
-                                      }))
-                                    }
-                                    className="border rounded px-2 py-1 text-xs"
-                                  >
-                                    <option value="income">Income</option>
-                                    <option value="expense">Expense</option>
-                                  </select>
-                                </div>
-                              ) : (
-                                <>
-                                  {t.type === "income" ? "+" : "-"}${t.amount}
-                                </>
-                              )}
-                            </td>
+            <td className="px-4 py-2">
+              {isEditing ? (
+                <select
+                  value={editTransactionDraft?.category || "Other"}
+                  onChange={(e) =>
+                    setEditTransactionDraft((prev) => ({
+                      ...prev,
+                      category: e.target.value,
+                    }))
+                  }
+                  className="border rounded px-2 py-1 text-sm w-full"
+                >
+                  {categories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                t.category
+              )}
+            </td>
 
-                            <td className="px-4 py-2 text-center">
-                              {isEditing ? (
-                                <div className="flex items-center justify-center gap-2">
-                                  <button
-                                    onClick={saveEditTransaction}
-                                    className="text-green-600 hover:text-green-800"
-                                    title="Save"
-                                  >
-                                    <Check size={18} />
-                                  </button>
-                                  <button
-                                    onClick={cancelEditTransaction}
-                                    className="text-gray-500 hover:text-gray-700"
-                                    title="Cancel"
-                                  >
-                                    <X size={18} />
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="flex items-center justify-center gap-2">
-                                  <button
-                                    onClick={() => startEditTransaction(t)}
-                                    className="text-indigo-600 hover:text-indigo-800"
-                                    title="Edit"
-                                  >
-                                    <Pencil size={18} />
-                                  </button>
-                                  <button
-                                    onClick={() => deleteTransaction(t.id)}
-                                    className="text-red-600 hover:text-red-800"
-                                    title="Delete"
-                                  >
-                                    <Trash2 size={18} />
-                                  </button>
-                                </div>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </React.Fragment>
+            <td className="px-4 py-2">
+              {isEditing ? (
+                <select
+                  value={editTransactionDraft?.person || "joint"}
+                  onChange={(e) =>
+                    setEditTransactionDraft((prev) => ({
+                      ...prev,
+                      person: e.target.value,
+                    }))
+                  }
+                  className="border rounded px-2 py-1 text-sm w-full"
+                >
+                  <option value="joint">Joint</option>
+                  <option value="you">You</option>
+                  <option value="wife">Wife</option>
+                </select>
+              ) : (
+                personLabels[t.person] || t.person
+              )}
+            </td>
+
+            <td
+              className={`px-4 py-2 text-right font-bold ${
+                t.type === "income" ? "text-green-600" : "text-red-600"
+              }`}
+            >
+              {isEditing ? (
+                <div className="flex items-center gap-2 justify-end">
+                  <input
+                    type="number"
+                    value={editTransactionDraft?.amount || ""}
+                    onChange={(e) =>
+                      setEditTransactionDraft((prev) => ({
+                        ...prev,
+                        amount: e.target.value,
+                      }))
+                    }
+                    className="border rounded px-2 py-1 text-sm w-24 text-right"
+                  />
+                  <select
+                    value={editTransactionDraft?.type || "expense"}
+                    onChange={(e) =>
+                      setEditTransactionDraft((prev) => ({
+                        ...prev,
+                        type: e.target.value,
+                      }))
+                    }
+                    className="border rounded px-2 py-1 text-xs"
+                  >
+                    <option value="income">Income</option>
+                    <option value="expense">Expense</option>
+                  </select>
+                </div>
+              ) : (
+                <>
+                  {t.type === "income" ? "+" : "-"}${t.amount}
+                </>
+              )}
+            </td>
+
+            <td className="px-4 py-2 text-center">
+              {isEditing ? (
+                <div className="flex items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={saveEditTransaction}
+                    className="text-green-600 hover:text-green-800"
+                    title="Save"
+                  >
+                    <Check size={18} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelEditTransaction}
+                    className="text-gray-500 hover:text-gray-700"
+                    title="Cancel"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => startEditTransaction(t)}
+                    className="text-indigo-600 hover:text-indigo-800"
+                    title="Edit"
+                  >
+                    <Pencil size={18} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteTransaction(t.id)}
+                    className="text-red-600 hover:text-red-800"
+                    title="Delete"
+                  >
+                    <Trash2 size={18} />
+                  </button>
+                </div>
+              )}
+            </td>
+          </tr>
+        );
+      })}
+    </React.Fragment>
+  )}
+</React.Fragment>
+
                   ))}
 
                   {tableTransactions.length > 0 && (
@@ -3209,9 +3518,17 @@ const deleteRecurringRuleDb = async (id) => {
       className="flex items-center justify-between text-xs"
     >
       <div className="min-w-0 pr-3">
-        <p className="truncate font-medium text-gray-800">
-          {t.description || "Untitled"}
-        </p>
+       <div className="flex items-center gap-2 min-w-0">
+  	<p className="truncate font-medium text-gray-800">
+    	{t.description || "Untitled"}
+  	</p>
+  	{t.recurring_rule_id ? (
+    	<span className="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
+      Recurring
+    	</span>
+  	) : null}
+	</div>
+
         <p className="text-[11px] text-gray-500">
           {t.date} • {personLabels[t.person] || t.person}
         </p>

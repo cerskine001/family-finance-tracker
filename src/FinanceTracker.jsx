@@ -361,6 +361,12 @@ useEffect(() => {
   setApplyMonth(currentMonth);
 }, [currentMonth]);
 
+// Reset edit state when person filter changes
+useEffect(() => {
+  cancelEditRecurringRule();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [selectedPerson]);
+
   // ---------------------------------------------------------------------------
   // Load data (Supabase when authed+in household; otherwise local demo defaults)
   // ---------------------------------------------------------------------------
@@ -546,6 +552,11 @@ useEffect(() => {
     () => filterByPerson(budgets),
     [budgets, filterByPerson]
   );
+
+  const recurringRulesByPerson = useMemo(
+  () => filterByPerson(recurringRules),
+  [recurringRules, filterByPerson]
+);
 
   // Extra filtering for the Transactions table (search + category + type)
   const tableTransactions = useMemo(() => {
@@ -1167,7 +1178,7 @@ const applyRecurringForMonth = async (monthKey, opts = {}) => {
 
   const newTxns = [];
 
-  recurringRules.forEach((rule) => {
+  recurringRulesByPerson.forEach((rule) => {
     if (!rule.active) return;
 
     const safeDay = Math.min(Math.max(Number(rule.dayOfMonth) || 1, 1), 31);
@@ -1396,14 +1407,16 @@ const collapseAllMonths = () => {
 };
 
 //  ----------------------------------------------------------------------------
-//  Monthly summary cards at top
+//  Monthly summary cards at top (respects selectedPerson)
 //  ----------------------------------------------------------------------------
 const selectedMonth = applyMonth || currentMonth;
 
 const monthTotals = useMemo(() => {
   if (!selectedMonth) return { income: 0, expenses: 0, net: 0 };
 
-  const monthTxns = (transactions || []).filter((t) => (t.date || "").startsWith(selectedMonth));
+  const monthTxns = (transactionsByPerson || []).filter((t) =>
+    (t.date || "").startsWith(selectedMonth)
+  );
 
   let income = 0;
   let expenses = 0;
@@ -1415,7 +1428,8 @@ const monthTotals = useMemo(() => {
   }
 
   return { income, expenses, net: income - expenses };
-}, [transactions, selectedMonth]);
+}, [transactionsByPerson, selectedMonth]);
+
 
 //   ---------------------------------------------------------------------------
 //   Forecast calculation (no DB calls)
@@ -1441,7 +1455,7 @@ const forecastRows = useMemo(() => {
     let income = 0;
     let expenses = 0;
 
-    for (const r of (recurringRules || [])) {
+    for (const r of (recurringRulesByPerson || [])) {
       if (!r.active) continue;
       const amt = Number(r.amount || 0);
       if (r.type === "income") income += amt;
@@ -1454,10 +1468,19 @@ const forecastRows = useMemo(() => {
       expenses,
       net: income - expenses,
     });
-  }
 
+    const monthTxns = transactionsByPerson.filter(
+  	(t) => t.date && t.date.startsWith(monthKey)
+	);
+
+	for (const t of monthTxns) {
+  		const amt = Number(t.amount || 0);
+  		if (t.type === "income") income += amt;
+  		else expenses += amt;
+	}
+  }
   return rows;
-}, [recurringRules, applyMonth, currentMonth]);
+}, [recurringRulesByPerson, applyMonth, currentMonth]);
 
 
   // ---------------------------------------------------------------------------
@@ -2148,6 +2171,16 @@ const deleteRecurringRuleDb = async (id) => {
                 <p className="text-xs text-gray-500">No recurring rules yet. Add one above.</p>
               ) : (
                 <div className="overflow-x-auto">
+
+		<div className="flex items-center justify-between mb-2">
+  		<span className="text-sm text-gray-600">
+    			Showing rules for:
+    		<span className="ml-1 font-semibold text-gray-900">
+      		{personLabels[selectedPerson] || selectedPerson}
+    		</span>
+  		</span>
+		</div>
+
                   <table className="w-full text-xs md:text-sm">
                     <thead className="bg-gray-100">
                       <tr>
@@ -2162,7 +2195,7 @@ const deleteRecurringRuleDb = async (id) => {
                       </tr>
                     </thead>
                     <tbody>
-  {recurringRules.map((r) => {
+  {recurringRulesByPerson.map((r) => {
     const isEditing = editingRecurringRuleId === r.id;
 
     return (
