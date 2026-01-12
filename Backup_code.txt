@@ -1,0 +1,20 @@
+# === Backup family-finance-tracker App Folder ===
+
+# 1. Source folder
+$source = "C:\dev\family-finance-tracker"
+
+# 2. Backup location
+$destinationRoot = "C:\Backups\family-finance-tracker"
+
+# 3. Timestamp for unique backup directory
+$timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$destination = Join-Path $destinationRoot "Backup_$timestamp"
+
+# 4. Ensure destination exists
+New-Item -ItemType Directory -Force -Path $destination | Out-Null
+
+# 5. Perform backup copy
+Copy-Item -Path $source -Destination $destination -Recurse -Force
+
+Write-Host "Backup Complete!" -ForegroundColor Green
+Write-Host "Backup saved to: $destination"

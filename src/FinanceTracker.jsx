@@ -105,6 +105,29 @@ const buildTransactionsCsv = (rows) => {
   return csvLines.join("\r\n");
 };
 
+// -----------------------------
+// Project file helpers
+// -----------------------------
+const sanitizeFileName = (name) => {
+  const original = String(name || "quote");
+
+  let cleaned = original
+    .normalize("NFKD")
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  const MAX = 120;
+  if (cleaned.length > MAX) {
+    const ext = cleaned.includes(".") ? "." + cleaned.split(".").pop() : "";
+    cleaned = cleaned.slice(0, MAX - ext.length) + ext;
+  }
+
+  return cleaned || "quote";
+};
+
+
 // ---------------------------------------------------------------------------
 // Month helpers (Budget Tab improvements)
 // ---------------------------------------------------------------------------
@@ -248,6 +271,43 @@ const FinanceTracker = () => {
     person: "joint",
     dayOfMonth: 1,
   });
+// ------------------------------
+// Recurring Manager UI state
+// ------------------------------
+const [recurringOpen, setRecurringOpen] = useState(true);
+const [recurringSortKey, setRecurringSortKey] = useState("description"); // description | category | amount | type | person | dayOfMonth | active
+const [recurringSortDir, setRecurringSortDir] = useState("asc"); // asc | desc
+const [recurringSearch, setRecurringSearch] = useState("");
+
+const [selectedRecurringIds, setSelectedRecurringIds] = useState(() => new Set());
+
+// Apply controls
+const [applyRecurringMode, setApplyRecurringMode] = useState("month"); // "month" | "date"
+const [applyRecurringDate, setApplyRecurringDate] = useState(
+  new Date().toISOString().split("T")[0]
+);
+
+// --------------------------------------
+// Projects (planned/home fixes) - starter
+// --------------------------------------
+const [projects, setProjects] = useState([]);
+const [newProject, setNewProject] = useState({
+  name: "",
+  vendor: "",
+  quotedAmount: "",
+  targetMonth: currentMonth, // "YYYY-MM"
+  notes: "",
+  // file will be selected separately
+});
+
+// Optional: store selected file in state (so you can upload on save)
+// const [newProjectFile, setNewProjectFile] = useState(null);
+const [newProjectFiles, setNewProjectFiles] = useState([]);
+
+
+// For future: editing support
+const [editingProjectId, setEditingProjectId] = useState(null);
+const [editProjectDraft, setEditProjectDraft] = useState(null);
 
 // Budget: per-card "show all transactions" toggle
  const [showAllBudgetTxns, setShowAllBudgetTxns] = useState({});
@@ -380,54 +440,84 @@ useEffect(() => {
       try {
         const uid = session.user.id;
 
-        const [
-          txRes,
-          budRes,
-          aRes,
-          lRes,
-          rRes,
-        ] = await Promise.all([
-          supabase.from("transactions").select("*").eq("household_id", householdId).order("date", { ascending: false }),
-          supabase.from("budgets").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
-          supabase.from("assets").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
-          supabase.from("liabilities").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
-          supabase.from("recurring_rules").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
-        ]);
+const [
+  txRes,
+  budRes,
+  aRes,
+  lRes,
+  rRes,
+  pRes,
+  pfRes,
+] = await Promise.all([
+  supabase.from("transactions").select("*").eq("household_id", householdId).order("date", { ascending: false }),
+  supabase.from("budgets").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
+  supabase.from("assets").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
+  supabase.from("liabilities").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
+  supabase.from("recurring_rules").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
 
-        if (ignore) return;
+  // ✅ projects
+  supabase.from("planned_projects").select("*").eq("household_id", householdId).order("target_month", { ascending: true }),
+supabase.from("project_files").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
 
-        if (txRes.error) console.warn("[db] load transactions failed", txRes.error);
-        if (budRes.error) console.warn("[db] load budgets failed", budRes.error);
-        if (aRes.error) console.warn("[db] load assets failed", aRes.error);
-        if (lRes.error) console.warn("[db] load liabilities failed", lRes.error);
-        if (rRes.error) console.warn("[db] load recurring_rules failed", rRes.error);
+]);
 
-        const txns = (txRes.data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
-        const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount), month: toMonthKey(b.month) }));
-        const assetsRows = (aRes.data ?? []).map((a) => ({ ...a, value: Number(a.value) }));
-        const liabRows = (lRes.data ?? []).map((l) => ({ ...l, value: Number(l.value) }));
-        const rules = (rRes.data ?? []).map((r) => ({
-          id: r.id,
-          description: r.description,
-          category: r.category,
-          amount: Number(r.amount),
-          type: r.type,
-          person: r.person,
-          dayOfMonth: r.day_of_month ?? r.dayOfMonth ?? 1,
-          active: r.active !== false,
-          household_id: r.household_id,
-          created_by: r.created_by,
-          created_at: r.created_at,
-          frequency: r.frequency ?? 'monthly',
-          start_date: r.start_date,
-          end_date: r.end_date,
-        }));
+if (ignore) return;
 
-        setTransactions(txns);
-        setBudgets(buds);
-        setAssets(assetsRows);
-        setLiabilities(liabRows);
-        setRecurringRules(rules);
+if (txRes.error) console.warn("[db] load transactions failed", txRes.error);
+if (budRes.error) console.warn("[db] load budgets failed", budRes.error);
+if (aRes.error) console.warn("[db] load assets failed", aRes.error);
+if (lRes.error) console.warn("[db] load liabilities failed", lRes.error);
+if (rRes.error) console.warn("[db] load recurring_rules failed", rRes.error);
+if (pRes.error) console.warn("[db] load planned_projects failed", pRes.error);
+if (pfRes.error) console.warn("[db] load project_files failed", pfRes.error);
+
+const txns = (txRes.data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
+const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount), month: toMonthKey(b.month) }));
+const assetsRows = (aRes.data ?? []).map((a) => ({ ...a, value: Number(a.value) }));
+const liabRows = (lRes.data ?? []).map((l) => ({ ...l, value: Number(l.value) }));
+const rules = (rRes.data ?? []).map((r) => ({
+  id: r.id,
+  description: r.description,
+  category: r.category,
+  amount: Number(r.amount),
+  type: r.type,
+  person: r.person,
+  dayOfMonth: r.day_of_month ?? r.dayOfMonth ?? 1,
+  active: r.active !== false,
+  household_id: r.household_id,
+  created_by: r.created_by,
+  created_at: r.created_at,
+  frequency: r.frequency ?? "monthly",
+  start_date: r.start_date,
+  end_date: r.end_date,
+}));
+
+const filesRows = (pfRes.data ?? []).map((f) => ({
+  id: f.id,
+  householdId: f.household_id,
+  projectId: f.project_id,
+  fileName: f.file_name,
+  filePath: f.file_path,
+  mimeType: f.mime_type,
+  sizeBytes: f.size_bytes,
+  createdBy: f.created_by,
+  createdAt: f.created_at,
+}));
+
+
+const projRows = (pRes.data ?? []).map((p) => ({
+  ...p,
+//  quoted_amount: p.quoted_amount == null ? null : Number(p.quoted_amount),
+  quotedAmount: Number(p.quoted_amount ?? p.quotedAmount ?? 0), // ✅ normalize
+}));
+
+setTransactions(txns);
+setBudgets(buds);
+setAssets(assetsRows);
+setLiabilities(liabRows);
+setRecurringRules(rules);
+setProjects(projRows);
+setProjectFiles(filesRows);
       } catch (e) {
         console.warn("[db] loadFromDb threw", e);
       } finally {
@@ -518,6 +608,47 @@ useEffect(() => {
       storage.set("finance-recurring-rules", JSON.stringify(recurringRules)).catch(console.error);
     }
   }, [recurringRules, isLoading]);
+
+  // Storage bucket name (create in Supabase Storage)
+const PROJECT_QUOTES_BUCKET = "project_quotes";
+
+// Upload helper (starter)
+// - You can call this after inserting the project row to DB (so you have projectId)
+// - For now it just shows the wiring.
+const uploadProjectQuoteFiles = async ({ householdId, projectId, files }) => {
+  if (!files?.length) return [];
+
+  if (!canViewData || !householdId) {
+    alert("Sign in + select a household to upload files.");
+    return [];
+  }
+
+  const uploaded = [];
+
+  for (const file of files) {
+    const safeName = sanitizeFileName(file.name);
+    const path = `households/${householdId}/projects/${projectId}/${Date.now()}_${safeName}`;
+
+    const { data, error } = await supabase.storage
+      .from(PROJECT_QUOTES_BUCKET)
+      .upload(path, file, { upsert: true });
+
+    if (error) {
+      console.error("[projects] upload failed", error);
+      throw error;
+    }
+
+    uploaded.push({
+      fileName: file.name,
+      path: data.path,
+      mimeType: file.type || null,
+      sizeBytes: file.size ?? null,
+    });
+  }
+
+  return uploaded;
+};
+
 
   // ---------------------------------------------------------------------------
   // Filter by person
@@ -885,8 +1016,6 @@ useEffect(() => {
     return filteredBudgets.filter((b) => toMonthKey(b.month) === budgetViewMonth);
   }, [filteredBudgets, budgetViewMonth]);
 
-
-
   // Budget tab: apply search filter (category OR transaction description)
   const budgetsForViewMonthAndSearch = useMemo(() => {
     const q = (budgetSearch || "").trim().toLowerCase();
@@ -1083,6 +1212,141 @@ useEffect(() => {
     });
   };
 
+const addProjectDb = async () => {
+  const name = String(newProject.name || "").trim();
+  if (!name) return alert("Project name is required.");
+
+  const quotedAmount = Number(newProject.quotedAmount || 0);
+  const targetMonth = newProject.targetMonth || currentMonth;
+
+  // If not authed / no household, fall back to local-only (optional)
+  if (!canViewData || !householdId || !session?.user?.id) {
+    const projectId = Date.now();
+    setProjects((prev) => [
+      {
+        id: projectId,
+        name,
+        vendor: newProject.vendor || "",
+        quotedAmount,
+        targetMonth,
+        notes: newProject.notes || "",
+        quoteFilePath: null,
+        createdAt: new Date().toISOString(),
+      },
+      ...(prev ?? []),
+    ]);
+
+    setNewProject({
+      name: "",
+      vendor: "",
+      quotedAmount: "",
+      targetMonth: currentMonth,
+      notes: "",
+    });
+    setNewProjectFile(null);
+    return;
+  }
+
+  // 1) Insert row first (get real DB id)
+  const insertPayload = {
+    household_id: householdId,
+    name,
+    vendor: newProject.vendor || null,
+    quoted_amount: quotedAmount,
+    target_month: targetMonth,
+    notes: newProject.notes || null,
+    quote_file_path: null,
+    created_by: session.user.id,
+  };
+
+  const { data: inserted, error: insErr } = await supabase
+    .from("planned_projects")
+    .insert(insertPayload)
+    .select("*")
+    .single();
+
+  if (insErr) {
+    console.error("[db] addProject insert failed", insErr);
+    return alert(insErr.message || "Could not add project.");
+  }
+
+  let quoteFilePath = null;
+
+if (newProjectFiles?.length) {
+  try {
+    // Upload all files
+    const uploaded = await uploadProjectQuoteFiles({
+      householdId,
+      projectId: inserted.id,
+      files: newProjectFiles,
+    });
+
+    // Optional: set the "primary" file path onto planned_projects
+    quoteFilePath = uploaded?.[0]?.path || null;
+
+    if (quoteFilePath) {
+      const { error: upErr } = await supabase
+        .from("planned_projects")
+        .update({ quote_file_path: quoteFilePath })
+        .eq("id", inserted.id)
+        .eq("household_id", householdId);
+
+      if (upErr) console.warn("[db] project primary file path update failed", upErr);
+    }
+
+    // Persist ALL uploaded files in project_files table
+    if (uploaded?.length) {
+  	const rows = uploaded.map((u) => ({
+    	household_id: householdId,
+    	project_id: inserted.id,
+    	file_name: u.fileName,
+    	file_path: u.path,
+    	mime_type: u.mimeType ?? null,
+    	size_bytes: u.sizeBytes ?? null,
+    	created_by: session.user.id,
+  	}));
+
+      const { error: pfErr } = await supabase.from("project_files").insert(rows);
+	if (pfErr) {
+  		console.warn("[db] project_files insert failed", pfErr);
+  		alert(pfErr.message || "project_files insert failed");
+	}
+    }
+  } catch (e) {
+    console.warn("[projects] file upload failed", e);
+    // Continue: project still saved
+  }
+}
+
+
+  // 4) Update UI state from persisted row
+  const uiRow = {
+    id: inserted.id,
+    household_id: inserted.household_id,
+    name: inserted.name,
+    vendor: inserted.vendor || "",
+    quotedAmount: Number(inserted.quoted_amount || 0),
+    targetMonth: inserted.target_month,
+    notes: inserted.notes || "",
+    quoteFilePath: quoteFilePath ?? inserted.quote_file_path ?? null,
+    createdBy: inserted.created_by,
+    createdAt: inserted.created_at,
+  };
+
+  setProjects((prev) => [uiRow, ...(prev ?? [])]);
+
+  // Reset form
+  setNewProject({
+    name: "",
+    vendor: "",
+    quotedAmount: "",
+    targetMonth: currentMonth,
+    notes: "",
+  });
+  setNewProjectFiles([]);
+};
+
+
 const addRecurringRule = async () => {
     if (!session?.user?.id || !householdId) return;
 
@@ -1135,6 +1399,7 @@ const addRecurringRule = async () => {
     }
   };
 
+
   // ---------------------------------------------------------------------------
   // Recurring transaction helpers (monthly)
   // ---------------------------------------------------------------------------
@@ -1164,7 +1429,7 @@ const addRecurringRule = async () => {
 };
 
 const applyRecurringForMonth = async (monthKey, opts = {}) => {
-  const { silent = false } = opts;
+  const { silent = false, ruleIds } = opts;
 
   const notify = (msg) => {
     if (!silent) alert(msg);
@@ -1176,15 +1441,20 @@ const applyRecurringForMonth = async (monthKey, opts = {}) => {
   const [year, month] = monthKey.split("-");
   const pad2 = (n) => String(n).padStart(2, "0");
 
+  // ✅ NEW: determine which rules to apply
+  const hasSelection = Array.isArray(ruleIds) && ruleIds.length > 0;
+  const rulesToApply = hasSelection
+    ? (recurringRulesByPerson || []).filter((r) => ruleIds.includes(r.id))
+    : (recurringRulesByPerson || []);
+
   const newTxns = [];
 
-  recurringRulesByPerson.forEach((rule) => {
+  rulesToApply.forEach((rule) => {
     if (!rule.active) return;
 
     const safeDay = Math.min(Math.max(Number(rule.dayOfMonth) || 1, 1), 31);
     const date = `${year}-${month}-${pad2(safeDay)}`;
 
-    // Optional: keep legacy exists check (fine), but DB idempotency is the real guard
     const exists = transactions?.some(
       (t) =>
         t.date === date &&
@@ -1224,8 +1494,6 @@ const applyRecurringForMonth = async (monthKey, opts = {}) => {
       type: t.type,
       person: t.person,
       created_by: session.user.id,
-
-      // idempotency tags
       recurring_rule_id: t.recurring_rule_id,
       applied_month: monthKey,
     }));
@@ -1245,15 +1513,24 @@ const applyRecurringForMonth = async (monthKey, opts = {}) => {
     const inserted = (data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
     setTransactions((prev) => [...inserted, ...(prev ?? [])]);
 
-    notify(`Added ${inserted.length} recurring transaction(s) for ${monthKey}.`);
+    notify(
+      hasSelection
+        ? `Added ${inserted.length} selected recurring transaction(s) for ${monthKey}.`
+        : `Added ${inserted.length} recurring transaction(s) for ${monthKey}.`
+    );
     return;
   }
 
   // Local-only fallback
   const localRows = newTxns.map((t, idx) => ({ id: Date.now() + idx, ...t }));
   setTransactions((prev) => [...localRows, ...(prev ?? [])]);
-  notify(`Added ${localRows.length} recurring transaction(s) for ${monthKey}.`);
+  notify(
+    hasSelection
+      ? `Added ${localRows.length} selected recurring transaction(s) for ${monthKey}.`
+      : `Added ${localRows.length} recurring transaction(s) for ${monthKey}.`
+  );
 };
+
 
 const autoApplyRecurringForMonth = async (monthKey) => {
   if (!canViewData || !householdId || !session?.user?.id) return;
@@ -1262,7 +1539,113 @@ const autoApplyRecurringForMonth = async (monthKey) => {
   await applyRecurringForMonth(monthKey, { silent: true, source: "auto" });
 };
 
+// ------------------------------
+// Recurring selection helpers
+// ------------------------------
+const toggleRecurringSelected = (id) => {
+  setSelectedRecurringIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+};
 
+const clearRecurringSelection = () => setSelectedRecurringIds(new Set());
+
+const setSelectAllVisibleRecurring = (visibleRules, checked) => {
+  setSelectedRecurringIds((prev) => {
+    const next = new Set(prev);
+    for (const r of visibleRules) {
+      if (checked) next.add(r.id);
+      else next.delete(r.id);
+    }
+    return next;
+  });
+};
+
+const toggleRecurringSort = (key) => {
+  setRecurringSortKey((prevKey) => {
+    if (prevKey !== key) {
+      setRecurringSortDir("asc");
+      return key;
+    }
+    setRecurringSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    return prevKey;
+  });
+};
+
+const applyRecurringForDate = async (dateStr, opts = {}) => {
+  // dateStr: YYYY-MM-DD
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    if (!opts?.silent) alert("Pick a valid date (YYYY-MM-DD).");
+    return;
+  }
+
+  const monthKey = dateStr.slice(0, 7); // YYYY-MM
+  return applyRecurringForMonth(monthKey, opts);
+};
+
+
+// ------------------------------
+// Recurring derived list (filter + sort)
+// ------------------------------
+const visibleRecurringRules = useMemo(() => {
+  const needle = String(recurringSearch || "").trim().toLowerCase();
+
+  // ✅ base list already respects selectedPerson (and joint passthrough) via filterByPerson
+  const base = (recurringRulesByPerson || []).filter((r) => {
+    if (!needle) return true;
+    return (
+      String(r.description || "").toLowerCase().includes(needle) ||
+      String(r.category || "").toLowerCase().includes(needle)
+    );
+  });
+
+  const dir = recurringSortDir === "asc" ? 1 : -1;
+
+  return [...base].sort((a, b) => {
+    const av = a?.[recurringSortKey];
+    const bv = b?.[recurringSortKey];
+
+    if (recurringSortKey === "amount" || recurringSortKey === "dayOfMonth") {
+      return (Number(av || 0) - Number(bv || 0)) * dir;
+    }
+    if (recurringSortKey === "active") {
+      return ((a.active ? 1 : 0) - (b.active ? 1 : 0)) * dir;
+    }
+    return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
+  });
+}, [recurringRulesByPerson, recurringSearch, recurringSortKey, recurringSortDir]);
+
+
+const allVisibleSelected =
+  visibleRecurringRules.length > 0 &&
+  visibleRecurringRules.every((r) => selectedRecurringIds.has(r.id));
+
+const someVisibleSelected =
+  visibleRecurringRules.some((r) => selectedRecurringIds.has(r.id)) && !allVisibleSelected;
+
+// ------------------------------
+// Apply Selected (you’ll add the 2 helper functions below)
+// ------------------------------
+const applySelectedRecurringToMonth = async () => {
+  const ids = Array.from(selectedRecurringIds);
+  if (!ids.length) {
+    alert("Select at least one recurring item to apply.");
+    return;
+  }
+  await applyRecurringForMonth(applyMonth, { ruleIds: ids }); // requires small change to applyRecurringForMonth
+};
+
+const applySelectedRecurringToDate = async () => {
+  const ids = Array.from(selectedRecurringIds);
+  if (!ids.length) {
+    alert("Select at least one recurring item to apply.");
+    return;
+  }
+  await applyRecurringForDate(applyRecurringDate, { ruleIds: ids }); // new helper
+};
 
 const autoAppliedRef = useRef(new Set());
 
@@ -1314,13 +1697,35 @@ useEffect(() => {
     setLiabilities((prev) => prev.filter((l) => l.id !== id));
   };
 
-  const deleteBudget = async (id) => {
+ const deleteBudget = async (id) => {
     if (canViewData) {
       const { error } = await supabase.from("budgets").delete().eq("id", id).eq("household_id", householdId);
       if (error) return alert(error.message);
     }
     setBudgets((prev) => prev.filter((b) => b.id !== id));
   };
+
+const deleteProjectDb = async (projectId) => {
+  if (!canViewData || !householdId) return;
+
+  // Optional: confirm
+  const ok = window.confirm("Delete this project?");
+  if (!ok) return;
+
+  const { error } = await supabase
+    .from("planned_projects")
+    .delete()
+    .eq("id", projectId)
+    .eq("household_id", householdId);
+
+  if (error) {
+    console.error("[projects] delete failed", error);
+    alert(error.message || "Could not delete project.");
+    return;
+  }
+
+  setProjects((prev) => (prev || []).filter((p) => p.id !== projectId));
+};
 
   // ---------------------------------------------------------------------------
   // Edit transaction helpers
@@ -1430,6 +1835,19 @@ const monthTotals = useMemo(() => {
   return { income, expenses, net: income - expenses };
 }, [transactionsByPerson, selectedMonth]);
 
+const projectsQuoteSubtotal = useMemo(() => {
+  return (projects ?? []).reduce((sum, p) => {
+    const val =
+      p?.quotedAmount != null
+        ? Number(p.quotedAmount)
+        : p?.quoted_amount != null
+          ? Number(p.quoted_amount)
+          : 0;
+
+    return sum + (Number.isFinite(val) ? val : 0);
+  }, 0);
+}, [projects]);
+
 
 //   ---------------------------------------------------------------------------
 //   Forecast calculation (no DB calls)
@@ -1484,7 +1902,7 @@ const forecastRows = useMemo(() => {
 
 
   // ---------------------------------------------------------------------------
-  // Edit helpers (Budgets / Assets / Liabilities/Recurring Rules)
+  // Edit helpers (Budgets / Assets / Liabilities/Recurring Rules/Projects)
   // ---------------------------------------------------------------------------
   
 const startEditBudget = (b) =>
@@ -1669,6 +2087,68 @@ const deleteRecurringRuleDb = async (id) => {
   setRecurringRules((prev) => prev.filter((r) => r.id !== id));
 };
 
+const startEditProject = (p) => {
+  setEditingProjectId(p.id);
+  setEditProjectDraft({
+    name: p.name || "",
+    vendor: p.vendor || "",
+    quotedAmount: p.quoted_amount ?? p.quotedAmount ?? "",
+    targetMonth: p.target_month ?? p.targetMonth ?? currentMonth,
+    notes: p.notes || "",
+  });
+};
+
+const cancelEditProject = () => {
+  setEditingProjectId(null);
+  setEditProjectDraft(null);
+};
+
+const saveEditProjectDb = async () => {
+  if (!editingProjectId || !editProjectDraft) return;
+  if (!canViewData || !householdId) return;
+
+  const name = String(editProjectDraft.name || "").trim();
+  if (!name) return alert("Project name is required.");
+
+  const payload = {
+    name,
+    vendor: String(editProjectDraft.vendor || "").trim() || null,
+    quoted_amount: Number(editProjectDraft.quotedAmount || 0),
+    target_month: editProjectDraft.targetMonth || currentMonth,
+    notes: String(editProjectDraft.notes || "").trim() || null,
+  };
+
+  const { data, error } = await supabase
+    .from("planned_projects")
+    .update(payload)
+    .eq("id", editingProjectId)
+    .eq("household_id", householdId)
+    .select("*")
+    .single();
+
+  if (error) {
+    console.error("[projects] update failed", error);
+    alert(error.message || "Could not update project.");
+    return;
+  }
+
+  setProjects((prev) =>
+    (prev || []).map((p) =>
+      p.id === editingProjectId
+        ? {
+            ...p,
+            ...data,
+            quotedAmount: Number(data.quoted_amount ?? data.quotedAmount ?? p.quotedAmount ?? 0),
+            targetMonth: data.target_month ?? data.targetMonth ?? p.targetMonth,
+            quotePath: data.quote_file_path ?? data.quotePath ?? p.quotePath,
+          }
+        : p
+    )
+  );
+
+  cancelEditProject();
+};
+
   // ---------------------------------------------------------------------------
   // Clear all
   // ---------------------------------------------------------------------------
@@ -1799,7 +2279,7 @@ const deleteRecurringRuleDb = async (id) => {
           </div>
 
           <div className="flex gap-2 border-b">
-            {["dashboard", "transactions", "assets", "liabilities", "budget"].map((tab) => (
+            {["dashboard", "transactions", "assets", "liabilities", "budget", "projects"].map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -2067,326 +2547,474 @@ const deleteRecurringRuleDb = async (id) => {
               </div>
             </div>
 
-            {/* Recurring Transactions Manager */}
-            <div className="mb-6 border rounded-lg p-4 bg-indigo-50/40">
-              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
-                <div>
-                  <h3 className="font-semibold text-gray-800">Recurring Transactions</h3>
-                  <p className="text-xs text-gray-600">
-                    Define monthly items (salary, rent, subscriptions) and apply them
-                    to the current month in one click.
-                  </p>
-                </div>
-	
-               <div className="flex items-center gap-3">
-  		<input
-    		 type="month"
-    		 value={applyMonth}
-    		 onChange={(e) => setApplyMonth(e.target.value)}
-    		 className="border rounded px-3 py-2"
-  		/>
+{/* ------------------------------------------------------------------ */}
+{/* Recurring Transactions Manager */}
+{/* ------------------------------------------------------------------ */}
+<div className="bg-white rounded-lg shadow p-6 mb-8">
+  {/* Header (collapsible) */}
+  <button
+    type="button"
+    onClick={() => setRecurringOpen((v) => !v)}
+    className="w-full flex items-center justify-between"
+  >
+    <div className="flex items-center gap-3">
+      <h2 className="text-xl font-semibold">Recurring Transactions</h2>
+      <span className="text-xs text-gray-500">
+        Showing rules for: <span className="font-semibold">{personLabels[selectedPerson] || selectedPerson}</span>
+      </span>
+      <span className="text-xs text-gray-500">
+        • {visibleRecurringRules.length} rule{visibleRecurringRules.length === 1 ? "" : "s"}
+      </span>
+      {selectedRecurringIds.size > 0 && (
+        <span className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-1 rounded-full">
+          {selectedRecurringIds.size} selected
+        </span>
+      )}
+    </div>
 
-  		<button
-    		 onClick={() => applyRecurringForMonth(applyMonth)}
-    		 className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700"
-  		>
-    		 Apply to {applyMonth}
-  		</button>
-		</div>
-              </div>
+    <span className="text-lg leading-none">{recurringOpen ? "▾" : "▸"}</span>
+  </button>
 
-              <div className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
+  {!recurringOpen ? null : (
+    <>
+      {/* Controls row */}
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+        {/* Search */}
+        <div className="md:col-span-4">
+          <label className="text-xs text-gray-500">Search (description/category)</label>
+          <input
+            type="text"
+            value={recurringSearch}
+            onChange={(e) => setRecurringSearch(e.target.value)}
+            className="border rounded px-3 py-2 w-full"
+            placeholder="e.g. generator, utilities, food…"
+          />
+        </div>
+
+        {/* Sort */}
+        <div className="md:col-span-4">
+          <label className="text-xs text-gray-500">Sort</label>
+          <div className="flex gap-2">
+            <select
+              value={recurringSortKey}
+              onChange={(e) => setRecurringSortKey(e.target.value)}
+              className="border rounded px-3 py-2 w-full"
+            >
+              <option value="description">Description</option>
+              <option value="category">Category</option>
+              <option value="amount">Amount</option>
+              <option value="type">Type</option>
+              <option value="person">Person</option>
+              <option value="dayOfMonth">Day of Month</option>
+              <option value="active">Active</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => setRecurringSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+              className="border rounded px-3 py-2 text-sm"
+              title="Toggle sort direction"
+            >
+              {recurringSortDir === "asc" ? "↑" : "↓"}
+            </button>
+          </div>
+        </div>
+
+        {/* Apply mode */}
+        <div className="md:col-span-4">
+          <label className="text-xs text-gray-500">Apply selected</label>
+          <div className="flex gap-2">
+            <select
+              value={applyRecurringMode}
+              onChange={(e) => setApplyRecurringMode(e.target.value)}
+              className="border rounded px-3 py-2"
+            >
+              <option value="month">To month</option>
+              <option value="date">To date</option>
+            </select>
+
+            {applyRecurringMode === "month" ? (
+              <>
                 <input
-                  type="text"
-                  placeholder="Description"
-                  value={newRecurring.description}
-                  onChange={(e) =>
-                    setNewRecurring({ ...newRecurring, description: e.target.value })
-                  }
+                  type="month"
+                  value={applyMonth}
+                  onChange={(e) => setApplyMonth(e.target.value)}
                   className="border rounded px-3 py-2"
                 />
-                <select
-                  value={newRecurring.category}
-                  onChange={(e) =>
-                    setNewRecurring({ ...newRecurring, category: e.target.value })
-                  }
-                  className="border rounded px-3 py-2"
-                >
-                  {categories.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  type="number"
-                  placeholder="Amount"
-                  value={newRecurring.amount}
-                  onChange={(e) =>
-                    setNewRecurring({ ...newRecurring, amount: e.target.value })
-                  }
-                  className="border rounded px-3 py-2"
-                />
-                <select
-                  value={newRecurring.type}
-                  onChange={(e) => setNewRecurring({ ...newRecurring, type: e.target.value })}
-                  className="border rounded px-3 py-2"
-                >
-                  <option value="income">Income</option>
-                  <option value="expense">Expense</option>
-                </select>
-                <select
-                  value={newRecurring.person}
-                  onChange={(e) =>
-                    setNewRecurring({ ...newRecurring, person: e.target.value })
-                  }
-                  className="border rounded px-3 py-2"
-                >
-                  <option value="joint">Joint</option>
-                  <option value="you">You</option>
-                  <option value="wife">Wife</option>
-                </select>
-                <input
-                  type="number"
-                  min={1}
-                  max={31}
-                  placeholder="Day"
-                  value={newRecurring.dayOfMonth}
-                  onChange={(e) =>
-                    setNewRecurring({ ...newRecurring, dayOfMonth: e.target.value })
-                  }
-                  className="border rounded px-3 py-2"
-                />
-
                 <button
                   type="button"
-                  onClick={addRecurringRule}
-                  className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 flex items-center justify-center gap-2 md:col-span-6"
+                  onClick={applySelectedRecurringToMonth}
+                  className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700"
                 >
-                  <PlusCircle size={18} /> Add Recurring Rule
+                  Apply Selected
                 </button>
-              </div>
+              </>
+            ) : (
+              <>
+                <input
+                  type="date"
+                  value={applyRecurringDate}
+                  onChange={(e) => setApplyRecurringDate(e.target.value)}
+                  className="border rounded px-3 py-2"
+                />
+                <button
+                  type="button"
+                  onClick={applySelectedRecurringToDate}
+                  className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700"
+                >
+                  Apply Selected
+                </button>
+              </>
+            )}
+          </div>
 
-              {recurringRules.length === 0 ? (
-                <p className="text-xs text-gray-500">No recurring rules yet. Add one above.</p>
-              ) : (
-                <div className="overflow-x-auto">
-
-		<div className="flex items-center justify-between mb-2">
-  		<span className="text-sm text-gray-600">
-    			Showing rules for:
-    		<span className="ml-1 font-semibold text-gray-900">
-      		{personLabels[selectedPerson] || selectedPerson}
-    		</span>
-  		</span>
-		</div>
-
-                  <table className="w-full text-xs md:text-sm">
-                    <thead className="bg-gray-100">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Description</th>
-                        <th className="px-3 py-2 text-left">Category</th>
-                        <th className="px-3 py-2 text-right">Amount</th>
-                        <th className="px-3 py-2 text-left">Type</th>
-                        <th className="px-3 py-2 text-left">Person</th>
-                        <th className="px-3 py-2 text-left">Schedule</th>
-                        <th className="px-3 py-2 text-center">Status</th>
-                        <th className="px-3 py-2 text-center">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-  {recurringRulesByPerson.map((r) => {
-    const isEditing = editingRecurringRuleId === r.id;
-
-    return (
-      <tr key={r.id} className="border-b">
-        <td className="px-3 py-2">
-          {isEditing ? (
-            <input
-              value={editRecurringDraft?.description || ""}
-              onChange={(e) =>
-                setEditRecurringDraft((prev) => ({
-                  ...(prev || {}),
-                  description: e.target.value,
-                }))
-              }
-              className="border rounded px-2 py-1 text-sm w-full"
-            />
-          ) : (
-            r.description
-          )}
-        </td>
-
-        <td className="px-3 py-2">
-          {isEditing ? (
-            <select
-              value={editRecurringDraft?.category || "Food"}
-              onChange={(e) =>
-                setEditRecurringDraft((prev) => ({
-                  ...(prev || {}),
-                  category: e.target.value,
-                }))
-              }
-              className="border rounded px-2 py-1 text-sm w-full"
+          <div className="flex gap-3 mt-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (visibleRecurringRules.length === 0) return;
+                setSelectAllVisibleRecurring(visibleRecurringRules, true);
+              }}
+              className="text-xs text-indigo-700 hover:text-indigo-900"
             >
-              {categories.map((cat) => (
-                <option key={cat} value={cat}>
-                  {cat}
-                </option>
-              ))}
-            </select>
-          ) : (
-            r.category
-          )}
-        </td>
-
-        <td className="px-3 py-2 text-right">
-          {isEditing ? (
-            <input
-              type="number"
-              value={editRecurringDraft?.amount ?? ""}
-              onChange={(e) =>
-                setEditRecurringDraft((prev) => ({
-                  ...(prev || {}),
-                  amount: e.target.value,
-                }))
-              }
-              className="border rounded px-2 py-1 text-sm w-28 text-right"
-            />
-          ) : (
-            `$${Number(r.amount || 0).toLocaleString()}`
-          )}
-        </td>
-
-        <td className="px-3 py-2 capitalize">
-          {isEditing ? (
-            <select
-              value={editRecurringDraft?.type || "expense"}
-              onChange={(e) =>
-                setEditRecurringDraft((prev) => ({
-                  ...(prev || {}),
-                  type: e.target.value,
-                }))
-              }
-              className="border rounded px-2 py-1 text-sm"
+              Select all (visible)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (visibleRecurringRules.length === 0) return;
+                setSelectAllVisibleRecurring(visibleRecurringRules, false);
+              }}
+              className="text-xs text-gray-600 hover:text-gray-800"
             >
-              <option value="income">Income</option>
-              <option value="expense">Expense</option>
-            </select>
-          ) : (
-            r.type
-          )}
-        </td>
-
-        <td className="px-3 py-2">
-          {isEditing ? (
-            <select
-              value={editRecurringDraft?.person || "joint"}
-              onChange={(e) =>
-                setEditRecurringDraft((prev) => ({
-                  ...(prev || {}),
-                  person: e.target.value,
-                }))
-              }
-              className="border rounded px-2 py-1 text-sm"
+              Clear (visible)
+            </button>
+            <button
+              type="button"
+              onClick={clearRecurringSelection}
+              className="text-xs text-gray-600 hover:text-gray-800"
             >
-              <option value="joint">Joint</option>
-              <option value="you">You</option>
-              <option value="wife">Wife</option>
-            </select>
-          ) : (
-            personLabels[r.person] || r.person
-          )}
-        </td>
+              Clear all
+            </button>
+          </div>
+        </div>
+      </div>
 
-        <td className="px-3 py-2">
-          {isEditing ? (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500">Every month on day</span>
-              <input
-                type="number"
-                min={1}
-                max={31}
-                value={editRecurringDraft?.dayOfMonth ?? 1}
-                onChange={(e) =>
-                  setEditRecurringDraft((prev) => ({
-                    ...(prev || {}),
-                    dayOfMonth: e.target.value,
-                  }))
-                }
-                className="border rounded px-2 py-1 text-sm w-16"
-              />
-            </div>
-          ) : (
-            <>Every month on day {r.dayOfMonth}</>
-          )}
-        </td>
+      {/* Keep your existing "Apply all for month" behavior (optional) */}
+      <div className="mt-5 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => applyRecurringForMonth(applyMonth)}
+          className="bg-gray-900 text-white rounded px-4 py-2 hover:bg-black"
+          title="Apply ALL active recurring items for the selected month"
+        >
+          Apply ALL for {applyMonth}
+        </button>
 
-        <td className="px-3 py-2 text-center">
-          <span
-            className={`inline-flex px-2 py-1 rounded-full text-[11px] font-semibold ${
-              r.active ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-600"
-            }`}
-          >
-            {r.active ? "Active" : "Paused"}
-          </span>
-        </td>
+        <span className="text-xs text-gray-500">
+          Tip: Use checkboxes to apply only specific items.
+        </span>
+      </div>
 
-        <td className="px-3 py-2 text-center">
-          {isEditing ? (
-            <div className="flex items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={saveEditRecurringRule}
-                className="text-indigo-600 hover:text-indigo-800"
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={cancelEditRecurringRule}
-                className="text-gray-600 hover:text-gray-800"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={() => startEditRecurringRule(r)}
-                className="text-indigo-600 hover:text-indigo-800"
-              >
-                Edit
-              </button>
+      {/* Table */}
+      <div className="mt-4 overflow-x-auto border rounded-lg">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-50">
+            <tr className="text-left">
+              <th className="px-3 py-2 w-10">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = someVisibleSelected;
+                  }}
+                  onChange={(e) =>
+                    setSelectAllVisibleRecurring(visibleRecurringRules, e.target.checked)
+                  }
+                />
+              </th>
 
-              <button
-                type="button"
-                onClick={() => toggleRecurringActiveDb(r)}
-                className="text-indigo-600 hover:text-indigo-800"
-              >
-                {r.active ? "Pause" : "Resume"}
-              </button>
+              <th className="px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => toggleRecurringSort("description")}
+                  className="font-semibold hover:underline"
+                >
+                  Description {recurringSortKey === "description" ? (recurringSortDir === "asc" ? "↑" : "↓") : ""}
+                </button>
+              </th>
 
-              <button
-                type="button"
-                onClick={() => deleteRecurringRuleDb(r.id)}
-                className="text-red-600 hover:text-red-800"
-              >
-                Delete
-              </button>
-            </div>
-          )}
-        </td>
-      </tr>
-    );
-  })}
-</tbody>
+              <th className="px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => toggleRecurringSort("category")}
+                  className="font-semibold hover:underline"
+                >
+                  Category {recurringSortKey === "category" ? (recurringSortDir === "asc" ? "↑" : "↓") : ""}
+                </button>
+              </th>
 
-                  </table>
-                </div>
-              )}
-            </div>
+              <th className="px-3 py-2 text-right">
+                <button
+                  type="button"
+                  onClick={() => toggleRecurringSort("amount")}
+                  className="font-semibold hover:underline"
+                >
+                  Amount {recurringSortKey === "amount" ? (recurringSortDir === "asc" ? "↑" : "↓") : ""}
+                </button>
+              </th>
+
+              <th className="px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => toggleRecurringSort("type")}
+                  className="font-semibold hover:underline"
+                >
+                  Type {recurringSortKey === "type" ? (recurringSortDir === "asc" ? "↑" : "↓") : ""}
+                </button>
+              </th>
+
+              <th className="px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => toggleRecurringSort("person")}
+                  className="font-semibold hover:underline"
+                >
+                  Person {recurringSortKey === "person" ? (recurringSortDir === "asc" ? "↑" : "↓") : ""}
+                </button>
+              </th>
+
+              <th className="px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => toggleRecurringSort("dayOfMonth")}
+                  className="font-semibold hover:underline"
+                >
+                  Schedule {recurringSortKey === "dayOfMonth" ? (recurringSortDir === "asc" ? "↑" : "↓") : ""}
+                </button>
+              </th>
+
+              <th className="px-3 py-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => toggleRecurringSort("active")}
+                  className="font-semibold hover:underline"
+                >
+                  Status {recurringSortKey === "active" ? (recurringSortDir === "asc" ? "↑" : "↓") : ""}
+                </button>
+              </th>
+
+              <th className="px-3 py-2 text-center font-semibold">Actions</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {visibleRecurringRules.map((r) => {
+              const isEditing = editingRecurringRuleId === r.id;
+              const checked = selectedRecurringIds.has(r.id);
+
+              return (
+                <tr key={r.id} className="border-b">
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleRecurringSelected(r.id)}
+                      disabled={isEditing}
+                      title={isEditing ? "Finish editing before selecting" : "Select"}
+                    />
+                  </td>
+
+                  <td className="px-3 py-2">
+                    {isEditing ? (
+                      <input
+                        value={editRecurringDraft?.description || ""}
+                        onChange={(e) =>
+                          setEditRecurringDraft((prev) => ({
+                            ...(prev || {}),
+                            description: e.target.value,
+                          }))
+                        }
+                        className="border rounded px-2 py-1 text-sm w-full"
+                      />
+                    ) : (
+                      r.description
+                    )}
+                  </td>
+
+                  <td className="px-3 py-2">
+                    {isEditing ? (
+                      <select
+                        value={editRecurringDraft?.category || "Food"}
+                        onChange={(e) =>
+                          setEditRecurringDraft((prev) => ({
+                            ...(prev || {}),
+                            category: e.target.value,
+                          }))
+                        }
+                        className="border rounded px-2 py-1 text-sm w-full"
+                      >
+                        {categories.map((cat) => (
+                          <option key={cat} value={cat}>
+                            {cat}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      r.category
+                    )}
+                  </td>
+
+                  <td className="px-3 py-2 text-right">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        value={editRecurringDraft?.amount ?? ""}
+                        onChange={(e) =>
+                          setEditRecurringDraft((prev) => ({
+                            ...(prev || {}),
+                            amount: e.target.value,
+                          }))
+                        }
+                        className="border rounded px-2 py-1 text-sm w-28 text-right"
+                      />
+                    ) : (
+                      `$${Number(r.amount || 0).toLocaleString()}`
+                    )}
+                  </td>
+
+                  <td className="px-3 py-2 capitalize">
+                    {isEditing ? (
+                      <select
+                        value={editRecurringDraft?.type || "expense"}
+                        onChange={(e) =>
+                          setEditRecurringDraft((prev) => ({
+                            ...(prev || {}),
+                            type: e.target.value,
+                          }))
+                        }
+                        className="border rounded px-2 py-1 text-sm"
+                      >
+                        <option value="income">Income</option>
+                        <option value="expense">Expense</option>
+                      </select>
+                    ) : (
+                      r.type
+                    )}
+                  </td>
+
+                  <td className="px-3 py-2">
+                    {isEditing ? (
+                      <select
+                        value={editRecurringDraft?.person || "joint"}
+                        onChange={(e) =>
+                          setEditRecurringDraft((prev) => ({
+                            ...(prev || {}),
+                            person: e.target.value,
+                          }))
+                        }
+                        className="border rounded px-2 py-1 text-sm"
+                      >
+                        <option value="joint">Joint</option>
+                        <option value="you">You</option>
+                        <option value="wife">Wife</option>
+                      </select>
+                    ) : (
+                      personLabels[r.person] || r.person
+                    )}
+                  </td>
+
+                  <td className="px-3 py-2">
+                    {isEditing ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-500">Every month on day</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={31}
+                          value={editRecurringDraft?.dayOfMonth ?? 1}
+                          onChange={(e) =>
+                            setEditRecurringDraft((prev) => ({
+                              ...(prev || {}),
+                              dayOfMonth: e.target.value,
+                            }))
+                          }
+                          className="border rounded px-2 py-1 text-sm w-16"
+                        />
+                      </div>
+                    ) : (
+                      <>Every month on day {r.dayOfMonth}</>
+                    )}
+                  </td>
+
+                  <td className="px-3 py-2 text-center">
+                    <span
+                      className={`inline-flex px-2 py-1 rounded-full text-[11px] font-semibold ${
+                        r.active ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-600"
+                      }`}
+                    >
+                      {r.active ? "Active" : "Paused"}
+                    </span>
+                  </td>
+
+                  <td className="px-3 py-2 text-center">
+                    {isEditing ? (
+                      <div className="flex items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={saveEditRecurringRule}
+                          className="text-indigo-600 hover:text-indigo-800"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEditRecurringRule}
+                          className="text-gray-600 hover:text-gray-800"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => startEditRecurringRule(r)}
+                          className="text-indigo-600 hover:text-indigo-800"
+                        >
+                          Edit
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => toggleRecurringActiveDb(r)}
+                          className="text-indigo-600 hover:text-indigo-800"
+                        >
+                          {r.active ? "Pause" : "Resume"}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => deleteRecurringRuleDb(r.id)}
+                          className="text-red-600 hover:text-red-800"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Your existing "Add recurring" form stays below (keep or move) */}
+      {/* (No change required unless you want an “Add New” collapse too.) */}
+    </>
+  )}
+</div>
+
 
             {/* Manual add form */}
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-6">
@@ -3613,7 +4241,277 @@ const deleteRecurringRuleDb = async (id) => {
               )}
             </div>
           </div>
-        )}
+        )}   {/* End of Budget Logic */}
+
+		        {/* PROJECTS TAB */}
+{activeTab === "projects" && (
+  <div className="space-y-6">
+    <div className="bg-white rounded-lg shadow p-6">
+      <h2 className="text-xl font-semibold mb-4">Planned Projects</h2>
+      <p className="text-sm text-gray-600 mb-4">
+        Track home fixes & planned spends (quotes, notes, and target month).
+      </p>
+
+      {/* Add Project form */}
+      <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+        <input
+          type="text"
+          placeholder="Project (e.g. Fireplace replacement)"
+          value={newProject.name}
+          onChange={(e) => setNewProject((p) => ({ ...p, name: e.target.value }))}
+          className="border rounded px-3 py-2 md:col-span-2"
+        />
+        <input
+          type="text"
+          placeholder="Vendor (optional)"
+          value={newProject.vendor}
+          onChange={(e) => setNewProject((p) => ({ ...p, vendor: e.target.value }))}
+          className="border rounded px-3 py-2"
+        />
+        <input
+          type="number"
+          placeholder="Quoted Amount"
+          value={newProject.quotedAmount}
+          onChange={(e) =>
+            setNewProject((p) => ({ ...p, quotedAmount: e.target.value }))
+          }
+          className="border rounded px-3 py-2"
+        />
+        <input
+          type="month"
+          value={newProject.targetMonth}
+          onChange={(e) => setNewProject((p) => ({ ...p, targetMonth: e.target.value }))}
+          className="border rounded px-3 py-2"
+        />
+        <input
+          type="file"
+          multiple
+  	  onChange={(e) => setNewProjectFiles(Array.from(e.target.files || []))}
+          className="border rounded px-3 py-2"
+          accept=".pdf,.xlsx,.xls,.doc,.docx,.png,.jpg,.jpeg"
+        />
+
+        <textarea
+          placeholder="Notes (optional)"
+          value={newProject.notes}
+          onChange={(e) => setNewProject((p) => ({ ...p, notes: e.target.value }))}
+          className="border rounded px-3 py-2 md:col-span-6"
+          rows={3}
+        />
+
+       <button
+  	type="button"
+  	onClick={addProjectDb}
+  	className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 flex items-center justify-center gap-2 md:col-span-6"
+>
+  	<PlusCircle size={20} /> Add Project
+	</button>
+
+      </div>
+    </div>
+
+    {/* Projects table */}
+    <div className="bg-white rounded-lg shadow p-6">
+      <h3 className="text-lg font-semibold mb-3">Projects List</h3>
+
+      <div className="overflow-x-auto border rounded-lg">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-50">
+            <tr className="text-left">
+              <th className="px-3 py-2">Project</th>
+              <th className="px-3 py-2">Vendor</th>
+              <th className="px-3 py-2 text-right">Quote</th>
+              <th className="px-3 py-2">Target Month</th>
+              <th className="px-3 py-2">Notes</th>
+              <th className="px-3 py-2 text-center">File</th>
+              <th className="px-3 py-2 text-center">Actions</th>
+            </tr>
+          </thead>
+
+<tbody>
+  {projects.map((p) => {
+    const isEditing = editingProjectId === p.id;
+   
+
+    return (
+      <tr key={p.id} className="border-b">
+        {/* Project Name */}
+        <td className="px-3 py-2 font-medium">
+          {isEditing ? (
+            <input
+              value={editProjectDraft?.name || ""}
+              onChange={(e) =>
+                setEditProjectDraft((prev) => ({
+                  ...(prev || {}),
+                  name: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm w-full"
+            />
+          ) : (
+            p.name
+          )}
+        </td>
+
+        {/* Vendor */}
+        <td className="px-3 py-2">
+          {isEditing ? (
+            <input
+              value={editProjectDraft?.vendor || ""}
+              onChange={(e) =>
+                setEditProjectDraft((prev) => ({
+                  ...(prev || {}),
+                  vendor: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm w-full"
+            />
+          ) : (
+            p.vendor || "-"
+          )}
+        </td>
+
+        {/* Quoted Amount */}
+        <td className="px-3 py-2 text-right">
+          {isEditing ? (
+            <input
+              type="number"
+              value={editProjectDraft?.quotedAmount ?? ""}
+              onChange={(e) =>
+                setEditProjectDraft((prev) => ({
+                  ...(prev || {}),
+                  quotedAmount: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm w-28 text-right"
+            />
+          ) : (
+            `$${Number(p.quotedAmount || 0).toLocaleString()}`
+          )}
+        </td>
+
+        {/* Target Month */}
+        <td className="px-3 py-2">
+          {isEditing ? (
+            <input
+              type="month"
+              value={editProjectDraft?.targetMonth || ""}
+              onChange={(e) =>
+                setEditProjectDraft((prev) => ({
+                  ...(prev || {}),
+                  targetMonth: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm"
+            />
+          ) : (
+            p.targetMonth
+          )}
+        </td>
+
+        {/* Notes */}
+        <td className="px-3 py-2">
+          {isEditing ? (
+            <textarea
+              value={editProjectDraft?.notes || ""}
+              onChange={(e) =>
+                setEditProjectDraft((prev) => ({
+                  ...(prev || {}),
+                  notes: e.target.value,
+                }))
+              }
+              className="border rounded px-2 py-1 text-sm w-full"
+              rows={2}
+            />
+          ) : (
+            <span className="text-xs text-gray-600">{p.notes || ""}</span>
+          )}
+        </td>
+
+     {/* Quote File */}
+	<td className="px-3 py-2 text-center">
+  	{p.quoteFilePath || p.quote_file_path ? (
+    	<span className="text-xs text-green-700 bg-green-50 border border-green-200 px-2 py-1 rounded-full">
+      		Uploaded
+    	</span>
+  	) : (
+    		<span className="text-xs text-gray-500">—</span>
+  	)}
+	</td>
+
+
+        {/* Actions */}
+        <td className="px-3 py-2 text-center">
+          {isEditing ? (
+            <div className="flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={saveEditProjectDb}
+                className="text-indigo-600 hover:text-indigo-800"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={cancelEditProject}
+                className="text-gray-600 hover:text-gray-800"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => startEditProject(p)}
+                className="text-indigo-600 hover:text-indigo-800"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteProjectDb(p.id)}
+                className="text-red-600 hover:text-red-800"
+              >
+                Delete
+              </button>
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+  })}
+
+  {!projects.length && (
+    <tr>
+      <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
+        No projects yet.
+      </td>
+    </tr>
+  )}
+</tbody>
+<tfoot>
+  <tr className="bg-gray-50 border-t">
+    <td colSpan={2} className="px-3 py-2 font-semibold text-gray-700">
+      Subtotal
+    </td>
+    <td className="px-3 py-2 text-right font-bold">
+      ${Number(projectsQuoteSubtotal || 0).toLocaleString()}
+    </td>
+    <td colSpan={4} />
+  </tr>
+</tfoot>
+        </table>
+      </div>
+
+      <p className="text-xs text-gray-500 mt-3">
+        Next step: persist projects to DB + store quote file path on the project record + add “Open file” links.
+      </p>
+    </div>
+  </div>
+)}
+   {/* End of Project Logic */}
+
       </div>  {/* closes max-w-7xl mx-auto */}
     </div>  {/* closes min-h-screen div */}
     </div>  {/* closes blur/disable wrapper */}
@@ -3640,6 +4538,8 @@ const deleteRecurringRuleDb = async (id) => {
         />
       )}
     </div>
+        
+
   );
 };
 
