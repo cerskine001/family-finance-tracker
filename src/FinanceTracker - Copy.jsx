@@ -800,10 +800,13 @@ const openProjectFileRow = async (fileRow, projectName) => {
 
 const projectFilesByProjectId = useMemo(() => {
   const map = {};
+
   for (const f of projectFiles || []) {
     const pid = Number(f.projectId ?? f.project_id);
     if (!pid) continue;
+
     if (!map[pid]) map[pid] = [];
+
     map[pid].push({
       id: f.id,
       projectId: pid,
@@ -814,8 +817,17 @@ const projectFilesByProjectId = useMemo(() => {
       createdAt: f.createdAt ?? f.created_at,
     });
   }
+
+  // 🔑 Always show newest files first
+  Object.values(map).forEach((files) => {
+    files.sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  });
+
   return map;
 }, [projectFiles]);
+
 
   // ---------------------------------------------------------------------------
   // Date range handling
@@ -2237,16 +2249,17 @@ const handleOpenQuote = async (p) => {
   setPendingOpenName(p.name || "Quote");
 };
 
-const uploadFilesForExistingProject = async (projectId) => {
-  if (!editProjectFiles?.length) return alert("Pick one or more files first.");
-  if (!canViewData || !householdId || !session?.user?.id) return alert("Sign in first.");
+const uploadFilesForExistingProject = async (projectId, filesOverride = null) => {
+  const files =
+    filesOverride != null
+      ? Array.from(filesOverride)
+      : Array.from(editProjectFiles ?? []);
 
-  // Make a stable copy (FileList can be finicky)
-  const files = Array.from(editProjectFiles);
+  if (!files?.length) return alert("Pick one or more files first.");
+  if (!canViewData || !householdId || !session?.user?.id) return alert("Sign in first.");
 
   let uploaded = [];
   try {
-    // 1) Upload to storage
     uploaded = await uploadProjectQuoteFiles({
       householdId,
       projectId,
@@ -2255,8 +2268,6 @@ const uploadFilesForExistingProject = async (projectId) => {
 
     if (!uploaded?.length) return;
 
-    // 2) Insert rows into project_files table
-    // IMPORTANT: Pair uploads to files by index (not name)
     const rows = uploaded.map((u, idx) => {
       const file = files[idx];
       return {
@@ -2276,12 +2287,9 @@ const uploadFilesForExistingProject = async (projectId) => {
       .select("*");
 
     if (error) {
-      // Minimal cleanup: remove uploaded objects if DB insert failed
       try {
         const paths = uploaded.map((u) => u.path).filter(Boolean);
-        if (paths.length) {
-          await supabase.storage.from(PROJECT_QUOTES_BUCKET).remove(paths);
-        }
+        if (paths.length) await supabase.storage.from(PROJECT_QUOTES_BUCKET).remove(paths);
       } catch (cleanupErr) {
         console.warn("[projects] cleanup remove failed", cleanupErr);
       }
@@ -2291,7 +2299,6 @@ const uploadFilesForExistingProject = async (projectId) => {
       return;
     }
 
-    // 3) Update UI state
     const newRows = (data ?? []).map((f) => ({
       id: f.id,
       householdId: f.household_id,
@@ -2305,7 +2312,9 @@ const uploadFilesForExistingProject = async (projectId) => {
     }));
 
     setProjectFiles((prev) => [...newRows, ...(prev ?? [])]);
-    setEditProjectFiles([]);
+
+    // Only clear staged state if we're using the staged path
+    if (filesOverride == null) setEditProjectFiles([]);
 
     alert(`Uploaded ${newRows.length} file(s).`);
   } catch (e) {
@@ -2314,6 +2323,117 @@ const uploadFilesForExistingProject = async (projectId) => {
   }
 };
 
+
+const deleteProjectFileDb = async (fileRow) => {
+  if (!fileRow?.id) return;
+  if (!canViewData || !householdId || !session?.user?.id) {
+    return alert("Sign in first.");
+  }
+
+  const ok = window.confirm(`Delete file "${fileRow.fileName || "file"}"?`);
+  if (!ok) return;
+
+  // 1) Delete DB row first (so UI state matches DB even if storage fails)
+  const { error: dbErr } = await supabase
+    .from("project_files")
+    .delete()
+    .eq("id", fileRow.id)
+    .eq("household_id", householdId);
+
+  if (dbErr) {
+    console.warn("[db] delete project_files failed", dbErr);
+    alert(dbErr.message || "Could not delete file record.");
+    return;
+  }
+
+  // 2) Best-effort delete from Storage (don’t block UI if this fails)
+  const path = fileRow.filePath;
+  if (path) {
+    const { error: stErr } = await supabase.storage
+      .from(PROJECT_QUOTES_BUCKET)
+      .remove([path]);
+
+    if (stErr) {
+      console.warn("[storage] remove failed", stErr);
+      // optional: alert, but usually I just log this
+    }
+  }
+
+  // 3) Update UI
+  setProjectFiles((prev) => (prev ?? []).filter((f) => f.id !== fileRow.id));
+};
+
+
+const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
+  if (!projectId || !oldFileRow?.id || !newFile) return;
+  if (!canViewData || !householdId || !session?.user?.id) {
+    return alert("Sign in first.");
+  }
+
+  const ok = window.confirm(
+    `Replace "${oldFileRow.fileName || "file"}" with "${newFile.name}"?\n\n` +
+      `Tip: This will keep a history entry (new row).`
+  );
+  if (!ok) return;
+
+  // 1) Upload new file to storage
+  const uploaded = await uploadProjectQuoteFiles({
+    householdId,
+    projectId,
+    files: [newFile],
+  });
+
+  const u = uploaded?.[0];
+  if (!u?.path) return alert("Upload failed.");
+
+  // 2) Insert new DB row (this is the “versioning”)
+  const row = {
+    household_id: householdId,
+    project_id: projectId,
+    file_name: newFile.name,
+    file_path: u.path,
+    mime_type: newFile.type || null,
+    size_bytes: newFile.size ?? null,
+    created_by: session.user.id,
+    // Optional (only if your table has it): replaces_file_id: oldFileRow.id,
+  };
+
+  const { data, error } = await supabase
+    .from("project_files")
+    .insert(row)
+    .select("*")
+    .single();
+
+  if (error) {
+    // Cleanup storage if DB insert failed
+    try {
+      await supabase.storage.from(PROJECT_QUOTES_BUCKET).remove([u.path]);
+    } catch (cleanupErr) {
+      console.warn("[projects] cleanup remove failed", cleanupErr);
+    }
+    console.warn("[db] insert project_files failed", error);
+    return alert(error.message || "Could not save replacement file record.");
+  }
+
+  // 3) Update UI (prepend newest)
+  const uiRow = {
+    id: data.id,
+    householdId: data.household_id,
+    projectId: data.project_id,
+    fileName: data.file_name,
+    filePath: data.file_path,
+    mimeType: data.mime_type,
+    sizeBytes: data.size_bytes,
+    createdBy: data.created_by,
+    createdAt: data.created_at,
+  };
+
+  setProjectFiles((prev) => [uiRow, ...(prev ?? [])]);
+
+  // 4) Optional: delete the old one (DB + storage)
+  // If you want “replace truly replaces”, uncomment this:
+  // await deleteProjectFileDb(oldFileRow);
+};
 
 
   // ---------------------------------------------------------------------------
@@ -2739,7 +2859,7 @@ const uploadFilesForExistingProject = async (projectId) => {
       )}
     </div>
 
-    <span className="text-lg leading-none">{recurringOpen ? "▾" : "▸"}</span>
+    <span className="text-lg text-indigo-700 leading-none">{recurringOpen ? "show less ▾" : "Show Recurring ▸"}</span>
   </button>
 
   {!recurringOpen ? null : (
@@ -4529,7 +4649,6 @@ const uploadFilesForExistingProject = async (projectId) => {
 <tbody>
   {projects.map((p) => {
     const isEditing = editingProjectId === p.id;
-   
 
     return (
       <tr key={p.id} className="border-b">
@@ -4626,111 +4745,143 @@ const uploadFilesForExistingProject = async (projectId) => {
           )}
         </td>
 
-     {/* Quote File */}
-<td className="px-3 py-2 text-center">
-  {(() => {
-    const pid = Number(p.id);
-    const files = projectFilesByProjectId[pid] || [];
+        {/* Quote Files */}
+        <td className="px-3 py-2 text-center">
+          {(() => {
+            const pid = Number(p.id);
+            const files = projectFilesByProjectId?.[pid] || [];
 
-    if (!files.length) return <span className="text-xs text-gray-500">—</span>;
+            if (!files.length) return <span className="text-xs text-gray-500">—</span>;
 
-    return (
-      <details className="inline-block text-left">
-        <summary className="cursor-pointer text-xs text-indigo-600 hover:underline list-none">
-          Open quote ({files.length} file{files.length === 1 ? "" : "s"})
-        </summary>
+            return (
+              <details className="inline-block text-left">
+                <summary className="cursor-pointer text-xs text-indigo-600 hover:underline list-none">
+                  Open quote ({files.length} file{files.length === 1 ? "" : "s"})
+                </summary>
 
-        <div className="mt-2 w-64 rounded-lg border bg-white shadow-sm p-2">
-          {files.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              onClick={() => openProjectFileRow(f, p.name)}
-              className="w-full text-left text-xs px-2 py-1 rounded hover:bg-gray-50"
-              title={f.filePath}
-            >
-              {f.fileName || "Quote file"}
-            </button>
-          ))}
-        </div>
-      </details>
-    );
-  })()}
-</td>
+                <div className="mt-2 w-80 max-w-[80vw] rounded-lg border bg-white shadow-sm p-2">
+                  <div className="max-h-56 overflow-auto">
+                    {files.map((f) => (
+                      <div
+                        key={f.id}
+                        className="flex items-center justify-between gap-2 px-2 py-2 rounded hover:bg-gray-50"
+                        title={f.filePath}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => openProjectFileRow(f, p.name)}
+                          className="min-w-0 text-left text-xs text-indigo-700 hover:underline truncate"
+                        >
+                          {f.fileName || "Quote file"}
+                        </button>
 
+                        <div className="flex items-center gap-2 shrink-0">
+                          {/* Replace */}
+                          <label className="text-xs text-gray-700 hover:underline cursor-pointer">
+                            Replace
+                            <input
+                              type="file"
+                              className="hidden"
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.target.value = "";
+                                if (!file) return;
+                                await replaceProjectFile({
+                                  projectId: pid,
+                                  oldFileRow: f,
+                                  newFile: file,
+                                });
+                              }}
+                            />
+                          </label>
 
-       {/* Actions */}
-<td className="px-3 py-2 text-center">
-  {isEditing ? (
-    <div className="flex flex-col items-center gap-2">
-      {/* Upload additional files */}
-      <label className="text-xs text-indigo-600 hover:underline cursor-pointer">
-        Add files
-        <input
-          type="file"
-          multiple
-          className="hidden"
-	onChange={(e) => {
-  	  const files = Array.from(e.target.files || []);
-  	  if (!files.length) return;
+                          {/* Delete */}
+                          <button
+                            type="button"
+                            onClick={() => deleteProjectFileDb(f)}
+                            className="text-xs text-red-600 hover:underline"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </details>
+            );
+          })()}
+        </td>
 
-  	  // Stage files for persistence on Save
-  	     setEditProjectFiles((prev) => [...(prev ?? []), ...files]);
+        {/* Actions */}
+        <td className="px-3 py-2 text-center">
+          {isEditing ? (
+            <div className="flex flex-col items-center gap-2">
+              {/* Upload additional files (staged until Save) */}
+              <label className="text-xs text-indigo-600 hover:underline cursor-pointer">
+                Add more files
+                <input
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    e.target.value = "";
+                    if (!files.length) return;
 
-  	     e.target.value = "";
-	}}
+                    // Stage files for persistence on Save
+                    setEditProjectFiles((prev) => [...(prev ?? []), ...files]);
+                  }}
+                />
+              </label>
 
-        />
-      </label>
+              {/* Show staged count (VALID location: inside td) */}
+              {!!editProjectFiles?.length && (
+                <div className="text-[11px] text-gray-500">
+                  {editProjectFiles.length} file(s) will upload on Save
+                </div>
+              )}
 
-      {/* Save / Cancel */}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={saveEditProjectDb}
-          className="text-indigo-600 hover:text-indigo-800"
-        >
-          Save
-        </button>
-        <button
-          type="button"
-          onClick={cancelEditProject}
-          className="text-gray-600 hover:text-gray-800"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  ) : (
-    <div className="flex items-center justify-center gap-2">
-      <button
-        type="button"
-        onClick={() => startEditProject(p)}
-        className="text-indigo-600 hover:text-indigo-800"
-      >
-        Edit
-      </button>
-      <button
-        type="button"
-        onClick={() => deleteProjectDb(p.id)}
-        className="text-red-600 hover:text-red-800"
-      >
-        Delete
-      </button>
-    </div>
-  )}
-</td>
-
+              {/* Save / Cancel */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={saveEditProjectDb}
+                  className="text-indigo-600 hover:text-indigo-800"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelEditProject}
+                  className="text-gray-600 hover:text-gray-800"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => startEditProject(p)}
+                className="text-indigo-600 hover:text-indigo-800"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteProjectDb(p.id)}
+                className="text-red-600 hover:text-red-800"
+              >
+                Delete
+              </button>
+            </div>
+          )}
+        </td>
       </tr>
     );
   })}
-
-   {editProjectFiles?.length > 0 && (
-  <div className="text-xs text-gray-500 mt-1">
-    {editProjectFiles.length} file(s) will be uploaded on save
-  </div>
-)}
-
 
   {!projects.length && (
     <tr>
@@ -4740,6 +4891,7 @@ const uploadFilesForExistingProject = async (projectId) => {
     </tr>
   )}
 </tbody>
+
 <tfoot>
   <tr className="bg-gray-50 border-t">
     <td colSpan={2} className="px-3 py-2 font-semibold text-gray-700">

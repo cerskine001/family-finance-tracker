@@ -192,6 +192,24 @@ const FinanceTracker = () => {
 
   const [recurringRules, setRecurringRules] = useState([]);
 
+  // Projects: replacement behavior
+  // "history" = keep old versions, "overwrite" = delete old version after new one is saved
+  const [projectReplaceMode, setProjectReplaceMode] = useState(() => {
+    try {
+      return window?.localStorage?.getItem("projectReplaceMode") || "history";
+    } catch {
+      return "history";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window?.localStorage?.setItem("projectReplaceMode", projectReplaceMode);
+    } catch {
+      // ignore
+    }
+  }, [projectReplaceMode]);
+
   const [editingTransactionId, setEditingTransactionId] = useState(null);
   const [editTransactionDraft, setEditTransactionDraft] = useState(null);
 
@@ -2324,14 +2342,17 @@ const uploadFilesForExistingProject = async (projectId, filesOverride = null) =>
 };
 
 
-const deleteProjectFileDb = async (fileRow) => {
+const deleteProjectFileDb = async (fileRow, opts = {}) => {
+  const { confirm = true } = opts;
   if (!fileRow?.id) return;
   if (!canViewData || !householdId || !session?.user?.id) {
     return alert("Sign in first.");
   }
 
-  const ok = window.confirm(`Delete file "${fileRow.fileName || "file"}"?`);
-  if (!ok) return;
+  if (confirm) {
+    const ok = window.confirm(`Delete file "${fileRow.fileName || "file"}"?`);
+    if (!ok) return;
+  }
 
   // 1) Delete DB row first (so UI state matches DB even if storage fails)
   const { error: dbErr } = await supabase
@@ -2370,9 +2391,13 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
     return alert("Sign in first.");
   }
 
+  const keepHistory = projectReplaceMode !== "overwrite";
+
   const ok = window.confirm(
     `Replace "${oldFileRow.fileName || "file"}" with "${newFile.name}"?\n\n` +
-      `Tip: This will keep a history entry (new row).`
+      (keepHistory
+        ? `Mode: Keep history (adds a new version).`
+        : `Mode: Overwrite (old version will be deleted).`)
   );
   if (!ok) return;
 
@@ -2430,9 +2455,10 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
 
   setProjectFiles((prev) => [uiRow, ...(prev ?? [])]);
 
-  // 4) Optional: delete the old one (DB + storage)
-  // If you want “replace truly replaces”, uncomment this:
-  // await deleteProjectFileDb(oldFileRow);
+  // 4) If overwrite mode, delete the old one (DB + storage) WITHOUT a second confirm
+  if (!keepHistory) {
+    await deleteProjectFileDb(oldFileRow, { confirm: false });
+  }
 };
 
 
@@ -4753,6 +4779,8 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
 
             if (!files.length) return <span className="text-xs text-gray-500">—</span>;
 
+            const latestId = files?.[0]?.id;
+
             return (
               <details className="inline-block text-left">
                 <summary className="cursor-pointer text-xs text-indigo-600 hover:underline list-none">
@@ -4760,20 +4788,67 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
                 </summary>
 
                 <div className="mt-2 w-80 max-w-[80vw] rounded-lg border bg-white shadow-sm p-2">
+                  {/* Replace mode toggle */}
+                  <div className="flex items-center justify-between px-2 pb-2 border-b">
+                    <div className="text-[11px] text-gray-600">Replace mode</div>
+                    <div className="inline-flex rounded-md border overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setProjectReplaceMode("history")}
+                        className={
+                          "px-2 py-1 text-[11px] " +
+                          (projectReplaceMode === "history"
+                            ? "bg-gray-100 font-semibold"
+                            : "bg-white text-gray-700")
+                        }
+                        title="Adds a new version and keeps older files"
+                      >
+                        Keep history
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setProjectReplaceMode("overwrite")}
+                        className={
+                          "px-2 py-1 text-[11px] border-l " +
+                          (projectReplaceMode === "overwrite"
+                            ? "bg-gray-100 font-semibold"
+                            : "bg-white text-gray-700")
+                        }
+                        title="Deletes the old version after saving the new one"
+                      >
+                        Overwrite
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="max-h-56 overflow-auto">
                     {files.map((f) => (
                       <div
                         key={f.id}
-                        className="flex items-center justify-between gap-2 px-2 py-2 rounded hover:bg-gray-50"
+                        className={
+                          "flex items-center justify-between gap-2 px-2 py-2 rounded hover:bg-gray-50 " +
+                          (f.id === latestId ? "bg-indigo-50" : "")
+                        }
                         title={f.filePath}
                       >
-                        <button
-                          type="button"
-                          onClick={() => openProjectFileRow(f, p.name)}
-                          className="min-w-0 text-left text-xs text-indigo-700 hover:underline truncate"
-                        >
-                          {f.fileName || "Quote file"}
-                        </button>
+                        <div className="min-w-0 flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openProjectFileRow(f, p.name)}
+                            className={
+                              "min-w-0 text-left text-xs text-indigo-700 hover:underline truncate " +
+                              (f.id === latestId ? "font-semibold" : "")
+                            }
+                          >
+                            {f.fileName || "Quote file"}
+                          </button>
+
+                          {f.id === latestId && (
+                            <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] text-indigo-700 shrink-0">
+                              Latest
+                            </span>
+                          )}
+                        </div>
 
                         <div className="flex items-center gap-2 shrink-0">
                           {/* Replace */}
