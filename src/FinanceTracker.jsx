@@ -2739,7 +2739,7 @@ const uploadFilesForExistingProject = async (projectId) => {
       )}
     </div>
 
-    <span className="text-lg leading-none">{recurringOpen ? "▾" : "▸"}</span>
+    <span className="text-lg text-indigo-700 leading-none">{recurringOpen ? "show less ▾" : "Show Recurring ▸"}</span>
   </button>
 
   {!recurringOpen ? null : (
