@@ -320,6 +320,10 @@ const [editProjectDraft, setEditProjectDraft] = useState(null);
  const [editingRecurringRuleId, setEditingRecurringRuleId] = useState(null);
  const [editRecurringDraft, setEditRecurringDraft] = useState(null);
  const [forecastOpen, setForecastOpen] = useState(false); // default collapsed
+ const [pendingOpenUrl, setPendingOpenUrl] = useState(null);
+ const [pendingOpenName, setPendingOpenName] = useState(null);
+ const [projectFiles, setProjectFiles] = useState([]);
+ const [editProjectFiles, setEditProjectFiles] = useState([]);
 
 
   const categories = [
@@ -434,10 +438,9 @@ useEffect(() => {
     let ignore = false;
     setIsLoading(true);
 
-    const loadFromDb = async () => {
-      if (!canViewData) return;
-
-      try {
+const loadFromDb = async () => {
+  if (!canViewData) return;
+    try {
         const uid = session.user.id;
 
 const [
@@ -460,6 +463,16 @@ const [
 supabase.from("project_files").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
 
 ]);
+
+if (pfRes.error) console.warn("[db] load project_files failed", pfRes.error);
+
+const projRows = (pRes.data ?? []).map((p) => ({
+  ...p,
+  quotedAmount: Number(p.quoted_amount ?? p.quotedAmount ?? 0),
+  targetMonth: p.target_month ?? p.targetMonth ?? currentMonth,
+  quoteFilePath: p.quote_file_path ?? p.quoteFilePath ?? null, // optional legacy
+}));
+
 
 if (ignore) return;
 
@@ -505,12 +518,6 @@ const filesRows = (pfRes.data ?? []).map((f) => ({
 }));
 
 
-const projRows = (pRes.data ?? []).map((p) => ({
-  ...p,
-//  quoted_amount: p.quoted_amount == null ? null : Number(p.quoted_amount),
-  quotedAmount: Number(p.quoted_amount ?? p.quotedAmount ?? 0), // ✅ normalize
-}));
-
 setTransactions(txns);
 setBudgets(buds);
 setAssets(assetsRows);
@@ -525,9 +532,9 @@ setProjectFiles(filesRows);
       }
     };
 
-    const loadDemoDefaults = async () => {
-      try {
-        const defaultTransactions = [
+const loadDemoDefaults = async () => {
+ try {
+      const defaultTransactions = [
           { id: 1, date: "2024-12-01", description: "Salary", category: "Income", amount: 5000, type: "income", person: "joint" },
           { id: 2, date: "2024-12-02", description: "Groceries", category: "Food", amount: 120, type: "expense", person: "joint" },
           { id: 3, date: "2024-12-03", description: "Gas", category: "Transportation", amount: 45, type: "expense", person: "you" },
@@ -649,6 +656,24 @@ const uploadProjectQuoteFiles = async ({ householdId, projectId, files }) => {
   return uploaded;
 };
 
+const openProjectFileRow = async (fileRow, projectName) => {
+  const path = fileRow?.filePath;
+  if (!path) return;
+
+  const { data, error } = await supabase.storage
+    .from(PROJECT_QUOTES_BUCKET) // "project_quotes"
+    .createSignedUrl(path, 60 * 5);
+
+  if (error) {
+    console.warn("[projects] signed url failed", error);
+    alert(error.message || "Could not open file.");
+    return;
+  }
+
+  setPendingOpenUrl(data.signedUrl);
+  setPendingOpenName(`${projectName || "Project"} — ${fileRow.fileName || "Quote"}`);
+};
+
 
   // ---------------------------------------------------------------------------
   // Filter by person
@@ -658,7 +683,7 @@ const uploadProjectQuoteFiles = async ({ householdId, projectId, files }) => {
       if (selectedPerson === "joint") return items;
       return items.filter(
         (item) => item.person === selectedPerson || item.person === "joint"
-      );
+     );
     },
     [selectedPerson]
   );
@@ -768,6 +793,29 @@ const uploadProjectQuoteFiles = async ({ householdId, projectId, files }) => {
   if (!currentMonth) return;
   setOpenMonths(new Set([currentMonth]));
 }, [currentMonth]);
+
+//  ---------------------------------------
+// Map: { [projectId]: [fileRow, fileRow...] }
+//  ----------------------------------------
+
+const projectFilesByProjectId = useMemo(() => {
+  const map = {};
+  for (const f of projectFiles || []) {
+    const pid = Number(f.projectId ?? f.project_id);
+    if (!pid) continue;
+    if (!map[pid]) map[pid] = [];
+    map[pid].push({
+      id: f.id,
+      projectId: pid,
+      fileName: f.fileName ?? f.file_name,
+      filePath: f.filePath ?? f.file_path,
+      mimeType: f.mimeType ?? f.mime_type,
+      sizeBytes: f.sizeBytes ?? f.size_bytes,
+      createdAt: f.createdAt ?? f.created_at,
+    });
+  }
+  return map;
+}, [projectFiles]);
 
   // ---------------------------------------------------------------------------
   // Date range handling
@@ -2096,6 +2144,7 @@ const startEditProject = (p) => {
     targetMonth: p.target_month ?? p.targetMonth ?? currentMonth,
     notes: p.notes || "",
   });
+	setEditProjectFiles([]); // reset new uploads
 };
 
 const cancelEditProject = () => {
@@ -2145,9 +2194,127 @@ const saveEditProjectDb = async () => {
         : p
     )
   );
+// 2) ✅ Persist any newly-added files for this existing project
+  if (editProjectFiles?.length) {
+    await uploadFilesForExistingProject(editingProjectId);
+    // uploadFilesForExistingProject already does:
+    // - upload to Storage
+    // - insert rows into project_files
+    // - setProjectFiles(...)
+    // - setEditProjectFiles([])
+  }
+
+  // 3) Close edit mode AFTER file insert finishes
 
   cancelEditProject();
 };
+
+const getSignedQuoteUrl = async (filePath) => {
+  if (!filePath) return null;
+
+  const { data, error } = await supabase.storage
+    .from(PROJECT_QUOTES_BUCKET) // "project_quotes"
+    .createSignedUrl(filePath, 60 * 5); // 5 minutes
+
+  if (error) {
+    console.warn("[projects] signed url failed", error);
+    alert(error.message || "Could not open file.");
+    return null;
+  }
+
+  return data?.signedUrl || null;
+};
+
+const handleOpenQuote = async (p) => {
+  const path = p.quoteFilePath || p.quote_file_path || null; // whichever you store
+  if (!path) return;
+
+  const url = await getSignedQuoteUrl(path);
+  if (!url) return;
+
+  // Instead of window.open(...) right away, store it and render a normal <a>
+  setPendingOpenUrl(url);
+  setPendingOpenName(p.name || "Quote");
+};
+
+const uploadFilesForExistingProject = async (projectId) => {
+  if (!editProjectFiles?.length) return alert("Pick one or more files first.");
+  if (!canViewData || !householdId || !session?.user?.id) return alert("Sign in first.");
+
+  // Make a stable copy (FileList can be finicky)
+  const files = Array.from(editProjectFiles);
+
+  let uploaded = [];
+  try {
+    // 1) Upload to storage
+    uploaded = await uploadProjectQuoteFiles({
+      householdId,
+      projectId,
+      files,
+    });
+
+    if (!uploaded?.length) return;
+
+    // 2) Insert rows into project_files table
+    // IMPORTANT: Pair uploads to files by index (not name)
+    const rows = uploaded.map((u, idx) => {
+      const file = files[idx];
+      return {
+        household_id: householdId,
+        project_id: projectId,
+        file_name: file?.name ?? u.fileName,
+        file_path: u.path,
+        mime_type: file?.type || null,
+        size_bytes: file?.size ?? null,
+        created_by: session.user.id,
+      };
+    });
+
+    const { data, error } = await supabase
+      .from("project_files")
+      .insert(rows)
+      .select("*");
+
+    if (error) {
+      // Minimal cleanup: remove uploaded objects if DB insert failed
+      try {
+        const paths = uploaded.map((u) => u.path).filter(Boolean);
+        if (paths.length) {
+          await supabase.storage.from(PROJECT_QUOTES_BUCKET).remove(paths);
+        }
+      } catch (cleanupErr) {
+        console.warn("[projects] cleanup remove failed", cleanupErr);
+      }
+
+      console.warn("[db] project_files insert failed", error);
+      alert(error.message || "Could not save file record(s).");
+      return;
+    }
+
+    // 3) Update UI state
+    const newRows = (data ?? []).map((f) => ({
+      id: f.id,
+      householdId: f.household_id,
+      projectId: f.project_id,
+      fileName: f.file_name,
+      filePath: f.file_path,
+      mimeType: f.mime_type,
+      sizeBytes: f.size_bytes,
+      createdBy: f.created_by,
+      createdAt: f.created_at,
+    }));
+
+    setProjectFiles((prev) => [...newRows, ...(prev ?? [])]);
+    setEditProjectFiles([]);
+
+    alert(`Uploaded ${newRows.length} file(s).`);
+  } catch (e) {
+    console.warn("[projects] uploadFilesForExistingProject failed", e);
+    alert(e?.message || "Upload failed. Please try again.");
+  }
+};
+
+
 
   // ---------------------------------------------------------------------------
   // Clear all
@@ -4310,6 +4477,37 @@ const saveEditProjectDb = async () => {
       </div>
     </div>
 
+	{pendingOpenUrl && (
+  <div className="mb-3 rounded-lg border bg-indigo-50 px-4 py-3 flex items-center justify-between">
+    <div className="text-sm">
+      Ready to open: <span className="font-semibold">{pendingOpenName}</span>
+      <span className="text-xs text-gray-600"> (link expires in ~5 min)</span>
+    </div>
+
+    <div className="flex items-center gap-3">
+      <a
+        href={pendingOpenUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="text-indigo-700 font-semibold hover:underline"
+      >
+        Open file
+      </a>
+      <button
+        type="button"
+        onClick={() => {
+          setPendingOpenUrl(null);
+          setPendingOpenName(null);
+        }}
+        className="text-gray-600 hover:text-gray-800 text-sm"
+      >
+        Dismiss
+      </button>
+    </div>
+  </div>
+)}
+
+
     {/* Projects table */}
     <div className="bg-white rounded-lg shadow p-6">
       <h3 className="text-lg font-semibold mb-3">Projects List</h3>
@@ -4429,58 +4627,110 @@ const saveEditProjectDb = async () => {
         </td>
 
      {/* Quote File */}
-	<td className="px-3 py-2 text-center">
-  	{p.quoteFilePath || p.quote_file_path ? (
-    	<span className="text-xs text-green-700 bg-green-50 border border-green-200 px-2 py-1 rounded-full">
-      		Uploaded
-    	</span>
-  	) : (
-    		<span className="text-xs text-gray-500">—</span>
-  	)}
-	</td>
+<td className="px-3 py-2 text-center">
+  {(() => {
+    const pid = Number(p.id);
+    const files = projectFilesByProjectId[pid] || [];
+
+    if (!files.length) return <span className="text-xs text-gray-500">—</span>;
+
+    return (
+      <details className="inline-block text-left">
+        <summary className="cursor-pointer text-xs text-indigo-600 hover:underline list-none">
+          Open quote ({files.length} file{files.length === 1 ? "" : "s"})
+        </summary>
+
+        <div className="mt-2 w-64 rounded-lg border bg-white shadow-sm p-2">
+          {files.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => openProjectFileRow(f, p.name)}
+              className="w-full text-left text-xs px-2 py-1 rounded hover:bg-gray-50"
+              title={f.filePath}
+            >
+              {f.fileName || "Quote file"}
+            </button>
+          ))}
+        </div>
+      </details>
+    );
+  })()}
+</td>
 
 
-        {/* Actions */}
-        <td className="px-3 py-2 text-center">
-          {isEditing ? (
-            <div className="flex items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={saveEditProjectDb}
-                className="text-indigo-600 hover:text-indigo-800"
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={cancelEditProject}
-                className="text-gray-600 hover:text-gray-800"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={() => startEditProject(p)}
-                className="text-indigo-600 hover:text-indigo-800"
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                onClick={() => deleteProjectDb(p.id)}
-                className="text-red-600 hover:text-red-800"
-              >
-                Delete
-              </button>
-            </div>
-          )}
-        </td>
+       {/* Actions */}
+<td className="px-3 py-2 text-center">
+  {isEditing ? (
+    <div className="flex flex-col items-center gap-2">
+      {/* Upload additional files */}
+      <label className="text-xs text-indigo-600 hover:underline cursor-pointer">
+        Add files
+        <input
+          type="file"
+          multiple
+          className="hidden"
+	onChange={(e) => {
+  	  const files = Array.from(e.target.files || []);
+  	  if (!files.length) return;
+
+  	  // Stage files for persistence on Save
+  	     setEditProjectFiles((prev) => [...(prev ?? []), ...files]);
+
+  	     e.target.value = "";
+	}}
+
+        />
+      </label>
+
+      {/* Save / Cancel */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={saveEditProjectDb}
+          className="text-indigo-600 hover:text-indigo-800"
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          onClick={cancelEditProject}
+          className="text-gray-600 hover:text-gray-800"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  ) : (
+    <div className="flex items-center justify-center gap-2">
+      <button
+        type="button"
+        onClick={() => startEditProject(p)}
+        className="text-indigo-600 hover:text-indigo-800"
+      >
+        Edit
+      </button>
+      <button
+        type="button"
+        onClick={() => deleteProjectDb(p.id)}
+        className="text-red-600 hover:text-red-800"
+      >
+        Delete
+      </button>
+    </div>
+  )}
+</td>
+
       </tr>
     );
   })}
+
+   {editProjectFiles?.length > 0 && (
+  <div className="text-xs text-gray-500 mt-1">
+    {editProjectFiles.length} file(s) will be uploaded on save
+  </div>
+)}
+
 
   {!projects.length && (
     <tr>

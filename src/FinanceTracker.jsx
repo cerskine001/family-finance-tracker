@@ -2194,6 +2194,17 @@ const saveEditProjectDb = async () => {
         : p
     )
   );
+// 2) ✅ Persist any newly-added files for this existing project
+  if (editProjectFiles?.length) {
+    await uploadFilesForExistingProject(editingProjectId);
+    // uploadFilesForExistingProject already does:
+    // - upload to Storage
+    // - insert rows into project_files
+    // - setProjectFiles(...)
+    // - setEditProjectFiles([])
+  }
+
+  // 3) Close edit mode AFTER file insert finishes
 
   cancelEditProject();
 };
@@ -4659,35 +4670,16 @@ const uploadFilesForExistingProject = async (projectId) => {
           type="file"
           multiple
           className="hidden"
-          onChange={async (e) => {
-            const files = Array.from(e.target.files || []);
-            if (!files.length) return;
+	onChange={(e) => {
+  	  const files = Array.from(e.target.files || []);
+  	  if (!files.length) return;
 
-            try {
-              const uploaded = await uploadProjectQuoteFiles({
-                householdId,
-                projectId: p.id,
-                files,
-              });
+  	  // Stage files for persistence on Save
+  	     setEditProjectFiles((prev) => [...(prev ?? []), ...files]);
 
-              // Optimistically add to UI
-              setProjectFiles((prev) => [
-                ...uploaded.map((u) => ({
-                  id: `tmp-${Date.now()}-${u.path}`,
-                  householdId,
-                  projectId: p.id,
-                  fileName: u.fileName,
-                  filePath: u.path,
-                  createdAt: new Date().toISOString(),
-                })),
-                ...(prev ?? []),
-              ]);
-            } catch (err) {
-              alert("File upload failed.");
-            } finally {
-              e.target.value = "";
-            }
-          }}
+  	     e.target.value = "";
+	}}
+
         />
       </label>
 
@@ -4732,6 +4724,13 @@ const uploadFilesForExistingProject = async (projectId) => {
       </tr>
     );
   })}
+
+   {editProjectFiles?.length > 0 && (
+  <div className="text-xs text-gray-500 mt-1">
+    {editProjectFiles.length} file(s) will be uploaded on save
+  </div>
+)}
+
 
   {!projects.length && (
     <tr>
