@@ -32,7 +32,8 @@ import {
   format,
 } from "date-fns";
 
-import TransactionCsvImport from "./components/TransactionCsvImport";
+// NOTE: We use an in-file importer (SmartTransactionImport) so we can support
+// multiple bank/CC CSV formats with a preview + mapping step.
 import AuthModal from "./components/AuthModal";
 import HouseholdGate from "./components/HouseholdGate";
 import InviteMember from "./components/InviteMember";
@@ -86,7 +87,19 @@ const toCsvValue = (value) => {
 };
 
 const buildTransactionsCsv = (rows) => {
-  const header = ["Date", "Description", "Amount", "Type", "Category", "Person"];
+  // Backward compatible: first 6 columns match the original app.
+  // New columns are appended.
+  const header = [
+    "Date",
+    "Description",
+    "Amount",
+    "Type", // income | expense
+    "Category",
+    "Person",
+    "Account",
+    "TransactionType", // normal | transfer
+    "TransferAccount",
+  ];
 
   const lines = rows.map((t) => [
     t.date,
@@ -95,6 +108,10 @@ const buildTransactionsCsv = (rows) => {
     t.type,
     t.category || "",
     t.person || "joint",
+    // These are denormalized for export convenience.
+    t.account_name || "",
+    t.transaction_type || "normal",
+    t.transfer_account_name || "",
   ]);
 
   const csvLines = [
@@ -103,6 +120,465 @@ const buildTransactionsCsv = (rows) => {
   ];
 
   return csvLines.join("\r\n");
+};
+
+// ---------------------------------------------------------------------------
+// Smart CSV Import (multi-profile + preview mapping + basic transfer detection)
+// ---------------------------------------------------------------------------
+const parseCsv = (text) => {
+  // Small, dependency-free CSV parser (handles quotes, commas, CRLF).
+  const rows = [];
+  let i = 0;
+  let field = "";
+  let row = [];
+  let inQuotes = false;
+
+  const pushField = () => {
+    row.push(field);
+    field = "";
+  };
+  const pushRow = () => {
+    // Ignore empty trailing rows
+    if (row.length === 1 && row[0] === "") {
+      row = [];
+      return;
+    }
+    rows.push(row);
+    row = [];
+  };
+
+  while (i < text.length) {
+    const c = text[i];
+
+    if (inQuotes) {
+      if (c === '"') {
+        const next = text[i + 1];
+        if (next === '"') {
+          field += '"';
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i += 1;
+        continue;
+      }
+      field += c;
+      i += 1;
+      continue;
+    }
+
+    if (c === '"') {
+      inQuotes = true;
+      i += 1;
+      continue;
+    }
+
+    if (c === ",") {
+      pushField();
+      i += 1;
+      continue;
+    }
+
+    if (c === "\n") {
+      pushField();
+      pushRow();
+      i += 1;
+      continue;
+    }
+
+    if (c === "\r") {
+      // CRLF
+      if (text[i + 1] === "\n") {
+        pushField();
+        pushRow();
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+
+    field += c;
+    i += 1;
+  }
+
+  // last field/row
+  pushField();
+  pushRow();
+  return rows;
+};
+
+const normalizeMoney = (v) => {
+  if (v == null) return 0;
+  const s = String(v)
+    .replace(/\$/g, "")
+    .replace(/,/g, "")
+    .replace(/\((.*)\)/, "-$1")
+    .trim();
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const tryParseDate = (v) => {
+  if (!v) return "";
+  const s = String(v).trim();
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // MM/DD/YYYY
+  const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (mdy) {
+    const mm = String(mdy[1]).padStart(2, "0");
+    const dd = String(mdy[2]).padStart(2, "0");
+    const yyyy = String(mdy[3]).length === 2 ? `20${mdy[3]}` : String(mdy[3]);
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // Fallback: Date() parse
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString().slice(0, 10);
+  }
+  return "";
+};
+
+const SmartTransactionImport = ({
+  accounts,
+  selectedPerson,
+  onImport,
+}) => {
+  const [profile, setProfile] = useState("generic");
+  const [sourceAccountId, setSourceAccountId] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [rawRows, setRawRows] = useState([]); // string[][]
+  const [mapping, setMapping] = useState({
+    date: "Date",
+    description: "Description",
+    amount: "Amount",
+    type: "Type",
+    category: "Category",
+  });
+  const [hasHeader, setHasHeader] = useState(true);
+  const [detectTransfers, setDetectTransfers] = useState(true);
+  const [preview, setPreview] = useState([]);
+  const [error, setError] = useState(null);
+
+  const profiles = useMemo(
+    () => ({
+      generic: {
+        label: "Generic (FinanceTracker export)",
+        defaults: {
+          date: "Date",
+          description: "Description",
+          amount: "Amount",
+          type: "Type",
+          category: "Category",
+        },
+      },
+      chase: {
+        label: "Chase (checking/savings)",
+        defaults: {
+          date: "Transaction Date",
+          description: "Description",
+          amount: "Amount",
+          type: "Type", // some exports include Type; if missing we infer by sign
+          category: "Category",
+        },
+      },
+      amex: {
+        label: "Amex (credit card)",
+        defaults: {
+          date: "Date",
+          description: "Description",
+          amount: "Amount",
+          type: "Type",
+          category: "Category",
+        },
+      },
+    }),
+    []
+  );
+
+  useEffect(() => {
+    const p = profiles[profile];
+    if (p?.defaults) setMapping(p.defaults);
+  }, [profile, profiles]);
+
+  const headers = useMemo(() => {
+    if (!rawRows?.length) return [];
+    return hasHeader ? rawRows[0] : rawRows[0].map((_, idx) => `Column ${idx + 1}`);
+  }, [rawRows, hasHeader]);
+
+  const dataRows = useMemo(() => {
+    if (!rawRows?.length) return [];
+    return hasHeader ? rawRows.slice(1) : rawRows;
+  }, [rawRows, hasHeader]);
+
+  const buildRowObj = useCallback(
+    (row) => {
+      const idxOf = (colName) => headers.findIndex((h) => String(h).trim() === String(colName).trim());
+
+      const dateIdx = idxOf(mapping.date);
+      const descIdx = idxOf(mapping.description);
+      const amtIdx = idxOf(mapping.amount);
+      const typeIdx = idxOf(mapping.type);
+      const catIdx = idxOf(mapping.category);
+
+      const rawDate = dateIdx >= 0 ? row[dateIdx] : "";
+      const rawDesc = descIdx >= 0 ? row[descIdx] : "";
+      const rawAmt = amtIdx >= 0 ? row[amtIdx] : "";
+      const rawType = typeIdx >= 0 ? row[typeIdx] : "";
+      const rawCat = catIdx >= 0 ? row[catIdx] : "";
+
+      const signed = normalizeMoney(rawAmt);
+      const inferredType = signed >= 0 ? "income" : "expense";
+      const type = rawType?.toLowerCase() === "income" || rawType?.toLowerCase() === "expense" ? rawType.toLowerCase() : inferredType;
+
+      return {
+        date: tryParseDate(rawDate) || new Date().toISOString().slice(0, 10),
+        description: String(rawDesc || "").trim(),
+        category: String(rawCat || "Uncategorized").trim() || "Uncategorized",
+        amount: Math.abs(signed),
+        type,
+        person: selectedPerson || "joint",
+        account_id: sourceAccountId ? Number(sourceAccountId) : null,
+        transaction_type: "normal",
+        transfer_account_id: null,
+      };
+    },
+    [headers, mapping, selectedPerson, sourceAccountId]
+  );
+
+  const detectTransferForRow = useCallback(
+    (t) => {
+      if (!detectTransfers) return t;
+      const desc = String(t.description || "").toLowerCase();
+      const src = accounts?.find((a) => String(a.id) === String(t.account_id));
+      if (!src) return t;
+
+      const isPayment = /\b(payment|autopay|pay\s+to|cc\s+payment)\b/.test(desc);
+      if (!isPayment) return t;
+
+      const creditAccounts = (accounts || []).filter((a) => a.account_type === "credit");
+      if (creditAccounts.length === 0) return t;
+
+      // Try to match by institution/name keywords
+      const pickByKeyword = (kw) => creditAccounts.find((a) => String(a.name || "").toLowerCase().includes(kw) || String(a.institution || "").toLowerCase().includes(kw));
+      let target = null;
+
+      if (desc.includes("amex") || desc.includes("american express")) target = pickByKeyword("amex") || pickByKeyword("american");
+      if (!target && (desc.includes("chase") || desc.includes("jp morgan"))) target = pickByKeyword("chase") || pickByKeyword("jpm");
+
+      if (!target && creditAccounts.length === 1) target = creditAccounts[0];
+
+      // If importing from a credit account itself, assume the counterparty is a bank/checking.
+      if (src.account_type === "credit") {
+        const bankAccounts = (accounts || []).filter((a) => a.account_type !== "credit");
+        if (bankAccounts.length === 1) target = bankAccounts[0];
+      }
+
+      if (!target) return t;
+
+      return {
+        ...t,
+        transaction_type: "transfer",
+        transfer_account_id: Number(target.id),
+      };
+    },
+    [accounts, detectTransfers]
+  );
+
+  const rebuildPreview = useCallback(() => {
+    try {
+      setError(null);
+      if (!dataRows.length || !headers.length) {
+        setPreview([]);
+        return;
+      }
+      const p = dataRows.slice(0, 10).map((r) => detectTransferForRow(buildRowObj(r)));
+      setPreview(p);
+    } catch (e) {
+      console.error("[import] preview failed", e);
+      setError("Could not build preview. Check mapping + CSV format.");
+      setPreview([]);
+    }
+  }, [dataRows, headers, buildRowObj, detectTransferForRow]);
+
+  useEffect(() => {
+    rebuildPreview();
+  }, [rebuildPreview]);
+
+  const onPickFile = async (file) => {
+    try {
+      setError(null);
+      if (!file) return;
+      setFileName(file.name || "");
+      const text = await file.text();
+      const parsed = parseCsv(text);
+      if (!parsed?.length) throw new Error("Empty CSV");
+      setRawRows(parsed);
+    } catch (e) {
+      console.error("[import] file read failed", e);
+      setError("Could not read CSV. Try exporting as CSV (not XLSX) and re-upload.");
+      setRawRows([]);
+    }
+  };
+
+  const doImport = () => {
+    if (!dataRows.length || !headers.length) {
+      alert("Choose a CSV file first.");
+      return;
+    }
+    if (!sourceAccountId) {
+      alert("Pick a source account (Amex/Chase/Checking) so imports can tag the account.");
+      return;
+    }
+
+    const rows = dataRows
+      .map((r) => detectTransferForRow(buildRowObj(r)))
+      .filter((t) => t.description || t.amount);
+
+    onImport(rows);
+    setRawRows([]);
+    setFileName("");
+  };
+
+  return (
+    <div className="border rounded-lg p-4 bg-white">
+      <div className="flex flex-col md:flex-row md:items-end gap-3">
+        <div className="flex-1">
+          <label className="text-xs text-gray-500">Import profile</label>
+          <select
+            value={profile}
+            onChange={(e) => setProfile(e.target.value)}
+            className="border rounded px-3 py-2 w-full"
+          >
+            {Object.entries(profiles).map(([k, v]) => (
+              <option key={k} value={k}>
+                {v.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex-1">
+          <label className="text-xs text-gray-500">Source account</label>
+          <select
+            value={sourceAccountId}
+            onChange={(e) => setSourceAccountId(e.target.value)}
+            className="border rounded px-3 py-2 w-full"
+          >
+            <option value="">Select account…</option>
+            {(accounts || []).map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}{a.institution ? ` (${a.institution})` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex-1">
+          <label className="text-xs text-gray-500">CSV file</label>
+          <input
+            type="file"
+            accept=".csv,text/csv"
+            onChange={(e) => onPickFile(e.target.files?.[0])}
+            className="border rounded px-3 py-2 w-full"
+          />
+          {fileName ? <div className="text-xs text-gray-500 mt-1">{fileName}</div> : null}
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-4">
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} />
+          First row is header
+        </label>
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" checked={detectTransfers} onChange={(e) => setDetectTransfers(e.target.checked)} />
+          Detect transfers (payments)
+        </label>
+      </div>
+
+      {error ? <div className="mt-3 text-sm text-red-600">{error}</div> : null}
+
+      {headers.length > 0 && (
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-5 gap-3">
+          {[
+            ["date", "Date"],
+            ["description", "Description"],
+            ["amount", "Amount"],
+            ["type", "Type"],
+            ["category", "Category"],
+          ].map(([key, label]) => (
+            <div key={key}>
+              <label className="text-xs text-gray-500">{label} column</label>
+              <select
+                value={mapping[key]}
+                onChange={(e) => setMapping((m) => ({ ...m, [key]: e.target.value }))}
+                className="border rounded px-3 py-2 w-full"
+              >
+                {headers.map((h, idx) => (
+                  <option key={`${key}-${idx}`} value={h}>
+                    {h || `Column ${idx + 1}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {preview.length > 0 && (
+        <div className="mt-4">
+          <div className="text-sm font-semibold text-gray-800 mb-2">Preview (first 10 rows)</div>
+          <div className="overflow-x-auto border rounded">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Description</th>
+                  <th className="px-3 py-2 text-right">Amount</th>
+                  <th className="px-3 py-2 text-left">Type</th>
+                  <th className="px-3 py-2 text-left">Txn</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.map((t, idx) => (
+                  <tr key={idx} className="border-t">
+                    <td className="px-3 py-2">{t.date}</td>
+                    <td className="px-3 py-2">{t.description}</td>
+                    <td className="px-3 py-2 text-right">${Number(t.amount || 0).toLocaleString()}</td>
+                    <td className="px-3 py-2">{t.type}</td>
+                    <td className="px-3 py-2">
+                      {t.transaction_type === "transfer" ? (
+                        <span className="text-xs bg-indigo-50 border border-indigo-200 text-indigo-700 px-2 py-1 rounded-full">transfer</span>
+                      ) : (
+                        <span className="text-xs bg-gray-50 border border-gray-200 text-gray-700 px-2 py-1 rounded-full">normal</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center justify-between">
+        <div className="text-xs text-gray-500">
+          Tip: payments will be auto-tagged as <span className="font-semibold">transfer</span> and excluded from spending totals.
+        </div>
+        <button
+          type="button"
+          onClick={doImport}
+          className="bg-indigo-600 text-white text-sm px-4 py-2 rounded-md hover:bg-indigo-700"
+        >
+          Import
+        </button>
+      </div>
+    </div>
+  );
 };
 
 // -----------------------------
@@ -187,6 +663,9 @@ const FinanceTracker = () => {
   // Liabilities state
   const [liabilities, setLiabilities] = useState([]);
 
+  // Accounts state (bank + credit cards)
+  const [accounts, setAccounts] = useState([]);
+
   // Budget state
   const [budgets, setBudgets] = useState([]);
 
@@ -227,6 +706,17 @@ const FinanceTracker = () => {
     category: "Food",
     amount: "",
     type: "expense",
+    person: "joint",
+    account_id: null, // accounts.id
+    transaction_type: "normal", // normal | transfer
+    transfer_account_id: null, // accounts.id (counterparty)
+  });
+
+  const [newAccount, setNewAccount] = useState({
+    name: "",
+    institution: "",
+    account_type: "checking", // checking | savings | credit
+    last4: "",
     person: "joint",
   });
 
@@ -449,6 +939,7 @@ const [
   aRes,
   lRes,
   rRes,
+  acctRes,
   pRes,
   pfRes,
 ] = await Promise.all([
@@ -457,6 +948,9 @@ const [
   supabase.from("assets").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
   supabase.from("liabilities").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
   supabase.from("recurring_rules").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
+
+  // ✅ accounts
+  supabase.from("accounts").select("*").eq("household_id", householdId).order("created_at", { ascending: false }),
 
   // ✅ projects
   supabase.from("planned_projects").select("*").eq("household_id", householdId).order("target_month", { ascending: true }),
@@ -484,7 +978,30 @@ if (rRes.error) console.warn("[db] load recurring_rules failed", rRes.error);
 if (pRes.error) console.warn("[db] load planned_projects failed", pRes.error);
 if (pfRes.error) console.warn("[db] load project_files failed", pfRes.error);
 
-const txns = (txRes.data ?? []).map((t) => ({ ...t, amount: Number(t.amount) }));
+const accountsRows = (acctRes.data ?? []).map((a) => ({
+  id: a.id,
+  household_id: a.household_id,
+  name: a.name,
+  institution: a.institution || "",
+  account_type: a.account_type || "checking",
+  last4: a.last4 || "",
+  created_by: a.created_by,
+  created_at: a.created_at,
+}));
+
+const acctById = new Map(accountsRows.map((a) => [Number(a.id), a]));
+
+const txns = (txRes.data ?? []).map((t) => {
+  const account = t.account_id ? acctById.get(Number(t.account_id)) : null;
+  const transfer = t.transfer_account_id ? acctById.get(Number(t.transfer_account_id)) : null;
+  return {
+    ...t,
+    amount: Number(t.amount),
+    transaction_type: t.transaction_type || "normal",
+    account_name: account?.name || "",
+    transfer_account_name: transfer?.name || "",
+  };
+});
 const buds = (budRes.data ?? []).map((b) => ({ ...b, amount: Number(b.amount), month: toMonthKey(b.month) }));
 const assetsRows = (aRes.data ?? []).map((a) => ({ ...a, value: Number(a.value) }));
 const liabRows = (lRes.data ?? []).map((l) => ({ ...l, value: Number(l.value) }));
@@ -518,6 +1035,7 @@ const filesRows = (pfRes.data ?? []).map((f) => ({
 }));
 
 
+setAccounts(accountsRows);
 setTransactions(txns);
 setBudgets(buds);
 setAssets(assetsRows);
@@ -554,9 +1072,15 @@ const loadDemoDefaults = async () => {
           { id: 1, name: "Credit Card", value: 2500, person: "joint" },
         ];
 
+        const defaultAccounts = [
+          { id: 1, name: "Checking", institution: "Chase", account_type: "checking", last4: "" },
+          { id: 2, name: "Amex", institution: "American Express", account_type: "credit", last4: "" },
+        ];
+
         if (ignore) return;
 
         setTransactions(defaultTransactions);
+        setAccounts(defaultAccounts);
         setBudgets(defaultBudgets);
         setAssets(defaultAssets);
         setLiabilities(defaultLiabilities);
@@ -750,6 +1274,8 @@ const openProjectFileRow = async (fileRow, projectName) => {
     let expenses = 0;
 
     tableTransactions.forEach((t) => {
+      const isTransfer = (t.transaction_type || "normal") === "transfer";
+      if (isTransfer) return; // exclude transfers from spending/income totals
       if (t.type === "income") income += t.amount;
       if (t.type === "expense") expenses += t.amount;
     });
@@ -781,8 +1307,11 @@ const openProjectFileRow = async (fileRow, projectName) => {
       const group = groups.get(key);
       group.items.push(t);
 
-      if (t.type === "income") group.income += t.amount;
-      if (t.type === "expense") group.expenses += t.amount;
+      const isTransfer = (t.transaction_type || "normal") === "transfer";
+      if (!isTransfer) {
+        if (t.type === "income") group.income += t.amount;
+        if (t.type === "expense") group.expenses += t.amount;
+      }
       group.net = group.income - group.expenses;
     });
 
@@ -899,11 +1428,11 @@ const projectFilesByProjectId = useMemo(() => {
   // Totals
   // ---------------------------------------------------------------------------
   const totalIncome = filteredTransactions
-    .filter((t) => t.type === "income")
+    .filter((t) => t.type === "income" && (t.transaction_type || "normal") !== "transfer")
     .reduce((sum, t) => sum + t.amount, 0);
 
   const totalExpenses = filteredTransactions
-    .filter((t) => t.type === "expense")
+    .filter((t) => t.type === "expense" && (t.transaction_type || "normal") !== "transfer")
     .reduce((sum, t) => sum + t.amount, 0);
 
   const totalAssets = filteredAssets.reduce((sum, a) => sum + a.value, 0);
@@ -924,6 +1453,7 @@ const projectFilesByProjectId = useMemo(() => {
         .filter(
           (t) =>
             t.type === "expense" &&
+            (t.transaction_type || "normal") !== "transfer" &&
             t.category === category &&
             t.date &&
             t.date.startsWith(month)
@@ -947,6 +1477,7 @@ const projectFilesByProjectId = useMemo(() => {
         .filter(
           (t) =>
             t.type === "expense" &&
+            (t.transaction_type || "normal") !== "transfer" &&
             t.category === category &&
             t.date &&
             t.date.startsWith(month)
@@ -960,6 +1491,7 @@ const projectFilesByProjectId = useMemo(() => {
     return transactionsByPerson
       .filter((t) =>
         t.type === "expense" &&
+        (t.transaction_type || "normal") !== "transfer" &&
         t.category === category &&
         t.date &&
         t.date.startsWith(month)
@@ -1156,6 +1688,9 @@ const projectFilesByProjectId = useMemo(() => {
         type: draft.type,
         category: draft.category,
         person: draft.person,
+        account_id: draft.account_id,
+        transaction_type: draft.transaction_type || "normal",
+        transfer_account_id: draft.transfer_account_id,
         created_by: session.user.id,
       };
 
@@ -1165,7 +1700,15 @@ const projectFilesByProjectId = useMemo(() => {
         alert(error.message);
         return;
       }
-      setTransactions((prev) => [{ ...data, amount: Number(data.amount) }, ...prev]);
+      const acct = data.account_id ? accounts.find((a) => Number(a.id) === Number(data.account_id)) : null;
+      const tr = data.transfer_account_id ? accounts.find((a) => Number(a.id) === Number(data.transfer_account_id)) : null;
+      setTransactions((prev) => [{
+        ...data,
+        amount: Number(data.amount),
+        transaction_type: data.transaction_type || "normal",
+        account_name: acct?.name || "",
+        transfer_account_name: tr?.name || "",
+      }, ...prev]);
     } else {
       setTransactions((prev) => [...prev, { ...draft, id: Date.now() }]);
     }
@@ -1177,7 +1720,60 @@ const projectFilesByProjectId = useMemo(() => {
       amount: "",
       type: "expense",
       person: "joint",
+      account_id: null,
+      transaction_type: "normal",
+      transfer_account_id: null,
     });
+  };
+
+  const importTransactions = async (rows) => {
+    if (!Array.isArray(rows) || rows.length === 0) return;
+
+    // Ensure only the current person is imported unless the CSV explicitly provides person.
+    const normalized = rows.map((r) => ({
+      ...r,
+      person: r.person || selectedPerson || "joint",
+    }));
+
+    if (canViewData) {
+      const payload = normalized.map((t) => ({
+        household_id: householdId,
+        date: t.date,
+        description: t.description,
+        amount: Number(t.amount || 0),
+        type: t.type,
+        category: t.category,
+        person: t.person,
+        account_id: t.account_id,
+        transaction_type: t.transaction_type || "normal",
+        transfer_account_id: t.transfer_account_id,
+        created_by: session.user.id,
+      }));
+
+      const { data, error } = await supabase.from("transactions").insert(payload).select("*");
+      if (error) {
+        console.warn("[db] importTransactions failed", error);
+        alert(error.message);
+        return;
+      }
+
+      const acctById = new Map((accounts || []).map((a) => [Number(a.id), a]));
+      const enriched = (data || []).map((t) => {
+        const acct = t.account_id ? acctById.get(Number(t.account_id)) : null;
+        const tr = t.transfer_account_id ? acctById.get(Number(t.transfer_account_id)) : null;
+        return {
+          ...t,
+          amount: Number(t.amount),
+          transaction_type: t.transaction_type || "normal",
+          account_name: acct?.name || "",
+          transfer_account_name: tr?.name || "",
+        };
+      });
+
+      setTransactions((prev) => [...enriched, ...prev]);
+    } else {
+      setTransactions((prev) => [...normalized.map((t) => ({ id: Date.now() + Math.random(), ...t })), ...prev]);
+    }
   };
 
   const addAsset = async () => {
@@ -1234,6 +1830,64 @@ const projectFilesByProjectId = useMemo(() => {
     }
 
     setNewLiability({ name: "", value: "", person: "joint" });
+  };
+
+  const addAccount = async () => {
+    if (!newAccount.name) return;
+
+    const draft = {
+      ...newAccount,
+      name: String(newAccount.name).trim(),
+      institution: String(newAccount.institution || "").trim(),
+      account_type: newAccount.account_type || "checking",
+      last4: String(newAccount.last4 || "").trim(),
+    };
+
+    if (canViewData) {
+      const payload = {
+        household_id: householdId,
+        name: draft.name,
+        institution: draft.institution,
+        account_type: draft.account_type,
+        last4: draft.last4,
+        created_by: session.user.id,
+      };
+
+      const { data, error } = await supabase.from("accounts").insert(payload).select("*").single();
+      if (error) {
+        console.warn("[db] addAccount failed", error);
+        alert(error.message);
+        return;
+      }
+      setAccounts((prev) => [data, ...prev]);
+    } else {
+      setAccounts((prev) => [{ id: Date.now(), ...draft }, ...prev]);
+    }
+
+    setNewAccount({ name: "", institution: "", account_type: "checking", last4: "" });
+  };
+
+  const deleteAccount = async (id) => {
+    if (!id) return;
+    // Guard: don't delete if referenced
+    const used = (transactions || []).some(
+      (t) => Number(t.account_id) === Number(id) || Number(t.transfer_account_id) === Number(id)
+    );
+    if (used) {
+      alert("This account is referenced by existing transactions. Remove those links first.");
+      return;
+    }
+
+    if (canViewData) {
+      const { error } = await supabase.from("accounts").delete().eq("id", id).eq("household_id", householdId);
+      if (error) {
+        console.warn("[db] deleteAccount failed", error);
+        alert(error.message);
+        return;
+      }
+    }
+
+    setAccounts((prev) => prev.filter((a) => Number(a.id) !== Number(id)));
   };
 
   const addBudget = async () => {
@@ -1811,6 +2465,12 @@ const deleteProjectDb = async (projectId) => {
     amount: parseFloat(editTransactionDraft.amount) || 0,
   };
 
+  const acct = updated.account_id ? accounts.find((a) => Number(a.id) === Number(updated.account_id)) : null;
+  const tr = updated.transfer_account_id ? accounts.find((a) => Number(a.id) === Number(updated.transfer_account_id)) : null;
+  updated.transaction_type = updated.transaction_type || "normal";
+  updated.account_name = acct?.name || "";
+  updated.transfer_account_name = tr?.name || "";
+
   // Optimistic UI update
   setTransactions((prev) =>
     prev.map((t) => (t.id === editingTransactionId ? { ...t, ...updated } : t))
@@ -1827,6 +2487,9 @@ const deleteProjectDb = async (projectId) => {
         type: updated.type,
         category: updated.category,
         person: updated.person,
+        account_id: updated.account_id || null,
+        transaction_type: updated.transaction_type || "normal",
+        transfer_account_id: (updated.transaction_type === "transfer" ? (updated.transfer_account_id || null) : null),
       })
       .eq("id", editingTransactionId)
       .eq("household_id", householdId)
@@ -1840,9 +2503,19 @@ const deleteProjectDb = async (projectId) => {
     }
 
     // Ensure amount is numeric + keep state in sync with DB
+    const acct = data.account_id ? accounts.find((a) => Number(a.id) === Number(data.account_id)) : null;
+    const tr = data.transfer_account_id ? accounts.find((a) => Number(a.id) === Number(data.transfer_account_id)) : null;
     setTransactions((prev) =>
       prev.map((t) =>
-        t.id === editingTransactionId ? { ...data, amount: Number(data.amount) } : t
+        t.id === editingTransactionId
+          ? {
+              ...data,
+              amount: Number(data.amount),
+              transaction_type: data.transaction_type || "normal",
+              account_name: acct?.name || "",
+              transfer_account_name: tr?.name || "",
+            }
+          : t
       )
     );
   }
@@ -1887,6 +2560,7 @@ const monthTotals = useMemo(() => {
   let expenses = 0;
 
   for (const t of monthTxns) {
+    if ((t.transaction_type || "normal") === "transfer") continue;
     const amt = Number(t.amount || 0);
     if (t.type === "income") income += amt;
     else expenses += amt;
@@ -2814,9 +3488,96 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
 
             <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-4">
               <div className="flex-1">
-                <TransactionCsvImport
-                  onImport={(rows) => setTransactions((prev) => [...prev, ...rows])}
+                <SmartTransactionImport
+                  accounts={accounts}
+                  selectedPerson={selectedPerson}
+                  onImport={importTransactions}
                 />
+
+                {/* Accounts manager */}
+                <div className="mt-4 border rounded-lg p-4 bg-white">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-gray-800">Accounts</div>
+                      <div className="text-xs text-gray-500">Add Checking/Savings + Credit cards (Amex, Chase, etc.) for clean transfer handling.</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-2">
+                    <input
+                      value={newAccount.name}
+                      onChange={(e) => setNewAccount((p) => ({ ...p, name: e.target.value }))}
+                      placeholder="Name (e.g., Amex Gold)"
+                      className="border rounded px-3 py-2 text-sm"
+                    />
+                    <input
+                      value={newAccount.institution}
+                      onChange={(e) => setNewAccount((p) => ({ ...p, institution: e.target.value }))}
+                      placeholder="Institution (optional)"
+                      className="border rounded px-3 py-2 text-sm"
+                    />
+                    <select
+                      value={newAccount.account_type}
+                      onChange={(e) => setNewAccount((p) => ({ ...p, account_type: e.target.value }))}
+                      className="border rounded px-3 py-2 text-sm"
+                    >
+                      <option value="checking">Checking</option>
+                      <option value="savings">Savings</option>
+                      <option value="credit">Credit card</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={addAccount}
+                      className="bg-gray-800 text-white text-sm px-3 py-2 rounded-md hover:bg-gray-900"
+                    >
+                      Add account
+                    </button>
+                  </div>
+
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Name</th>
+                          <th className="px-3 py-2 text-left">Institution</th>
+                          <th className="px-3 py-2 text-left">Type</th>
+                          <th className="px-3 py-2 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(accounts || []).map((a) => (
+                          <tr key={a.id} className="border-t">
+                            <td className="px-3 py-2 font-medium">{a.name}</td>
+                            <td className="px-3 py-2 text-gray-600">{a.institution || ""}</td>
+                            <td className="px-3 py-2">
+                              <span className="text-xs bg-gray-50 border border-gray-200 text-gray-700 px-2 py-1 rounded-full">
+                                {a.account_type}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <button
+                                type="button"
+                                onClick={() => deleteAccount(a.id)}
+                                className="inline-flex items-center gap-1 text-red-600 hover:text-red-700"
+                                title="Delete account"
+                              >
+                                <Trash2 size={16} />
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {(!accounts || accounts.length === 0) && (
+                          <tr className="border-t">
+                            <td className="px-3 py-3 text-gray-500" colSpan={4}>
+                              No accounts yet. Add Checking + your credit cards to enable transfer tagging.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
 
               <div className="md:w-auto">
@@ -3304,7 +4065,7 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
 
 
             {/* Manual add form */}
-            <div className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-8 gap-3 mb-6">
               <input
                 type="date"
                 value={newTransaction.date}
@@ -3365,10 +4126,66 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
                 <option value="you">You</option>
                 <option value="wife">Wife</option>
               </select>
+
+              <select
+                value={newTransaction.account_id || ""}
+                onChange={(e) =>
+                  setNewTransaction({
+                    ...newTransaction,
+                    account_id: e.target.value ? Number(e.target.value) : null,
+                  })
+                }
+                className="border rounded px-3 py-2"
+              >
+                <option value="">Account…</option>
+                {(accounts || []).map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                    {a.institution ? ` (${a.institution})` : ""}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={newTransaction.transaction_type || "normal"}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setNewTransaction((p) => ({
+                    ...p,
+                    transaction_type: v,
+                    transfer_account_id: v === "transfer" ? (p.transfer_account_id || null) : null,
+                  }));
+                }}
+                className="border rounded px-3 py-2"
+              >
+                <option value="normal">Normal</option>
+                <option value="transfer">Transfer / Payment</option>
+              </select>
+
+              {((newTransaction.transaction_type || "normal") === "transfer") && (
+                <select
+                  value={newTransaction.transfer_account_id || ""}
+                  onChange={(e) =>
+                    setNewTransaction({ ...newTransaction, transfer_account_id: e.target.value ? Number(e.target.value) : null })
+                  }
+                  className="border rounded px-3 py-2"
+                >
+                  <option value="">To/From account…</option>
+                  {(accounts || [])
+  .filter((a) => Number(a.id) !== Number(newTransaction.account_id))
+  .map((a) => (
+    <option key={a.id} value={a.id}>
+      {a.name}
+      {a.institution ? ` (${a.institution})` : ""}
+    </option>
+  ))}
+
+                </select>
+              )}
               <button
                 type="button"
                 onClick={addTransaction}
-                className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 flex items-center justify-center gap-2 md:col-span-6"
+                className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 flex items-center justify-center gap-2 md:col-span-8"
               >
                 <PlusCircle size={20} /> Add Transaction
               </button>
@@ -3520,6 +4337,8 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
                     <th className="px-4 py-2 text-left">Description</th>
                     <th className="px-4 py-2 text-left">Category</th>
                     <th className="px-4 py-2 text-left">Person</th>
+                    <th className="px-4 py-2 text-left">Account</th>
+                    <th className="px-4 py-2 text-left">Txn</th>
                     <th className="px-4 py-2 text-right">Amount</th>
                     <th className="px-4 py-2 text-center">Action</th>
                   </tr>
@@ -3544,7 +4363,7 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
       </button>
     </td>
 
-    <td className="px-4 py-2 text-xs text-gray-600">
+    <td colSpan={6} className="px-4 py-2 text-xs text-gray-600">
       Income:{" "}
       <span className="text-green-600 font-semibold">
         +${group.income.toLocaleString()}
@@ -3563,7 +4382,7 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
       </span>
     </td>
 
-    <td colSpan={3}></td>
+    {/* remaining columns covered by colSpan=6 above */}
   </tr>
 
   {isMonthOpen(group.key) && (
@@ -3665,6 +4484,79 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
                 </select>
               ) : (
                 personLabels[t.person] || t.person
+              )}
+            </td>
+
+            <td className="px-4 py-2">
+              {isEditing ? (
+                <select
+                  value={editTransactionDraft?.account_id || ""}
+                  onChange={(e) =>
+                    setEditTransactionDraft((prev) => ({
+                      ...prev,
+                      account_id: e.target.value ? Number(e.target.value) : null,
+                    }))
+                  }
+                  className="border rounded px-2 py-1 text-sm w-full"
+                >
+                  <option value="">—</option>
+                  {(accounts || []).map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}{a.institution ? ` (${a.institution})` : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="text-gray-700">{t.account_name || ""}</span>
+              )}
+            </td>
+
+            <td className="px-4 py-2">
+              {isEditing ? (
+                <div className="flex items-center gap-2">
+                  <select
+                    value={editTransactionDraft?.transaction_type || "normal"}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setEditTransactionDraft((prev) => ({
+                        ...prev,
+                        transaction_type: v,
+                        transfer_account_id: v === "transfer" ? (prev?.transfer_account_id || null) : null,
+                      }));
+                    }}
+                    className="border rounded px-2 py-1 text-sm"
+                  >
+                    <option value="normal">Normal</option>
+                    <option value="transfer">Transfer</option>
+                  </select>
+                  {(editTransactionDraft?.transaction_type || "normal") === "transfer" ? (
+                    <select
+                      value={editTransactionDraft?.transfer_account_id || ""}
+                      onChange={(e) =>
+                        setEditTransactionDraft((prev) => ({
+                          ...prev,
+                          transfer_account_id: e.target.value ? Number(e.target.value) : null,
+                        }))
+                      }
+                      className="border rounded px-2 py-1 text-sm"
+                    >
+                      <option value="">To/From…</option>
+                      {(accounts || []).filter((a) => Number(a.id) !== Number(editTransactionDraft?.account_id)).map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}{a.institution ? ` (${a.institution})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </div>
+              ) : (
+                (t.transaction_type || "normal") === "transfer" ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                    Transfer{t.transfer_account_name ? ` → ${t.transfer_account_name}` : ""}
+                  </span>
+                ) : (
+                  <span className="text-xs text-gray-500">Normal</span>
+                )
               )}
             </td>
 
