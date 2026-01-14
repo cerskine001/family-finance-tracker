@@ -262,15 +262,6 @@ const SmartTransactionImport = ({
   const [detectTransfers, setDetectTransfers] = useState(true);
   const [preview, setPreview] = useState([]);
   const [error, setError] = useState(null);
-  const [importSummary, setImportSummary] = useState(null);
-
-  const resetImport = () => {
-  setRawRows([]);
-  setFileName("");
-  setPreview([]);
-  setImportSummary(null);
-  setError(null);
-  };
 
   const profiles = useMemo(
     () => ({
@@ -307,34 +298,6 @@ const SmartTransactionImport = ({
     }),
     []
   );
-
-  // helper functions (put it here)
-  const computeImportSummary = useCallback((rows) => {
-    let expenses = 0;
-    let payments = 0;
-    let refunds = 0;
-
-    for (const t of rows || []) {
-      const isTransfer = (t.transaction_type || "normal") === "transfer";
-      if (isTransfer) {
-        payments++;
-        continue;
-      }
-
-      const desc = String(t.description || "").toLowerCase();
-      const looksRefundy =
-      /\b(refund|returned|return|reversal|chargeback)\b/.test(desc);
-
-      if (looksRefundy) {
-        refunds++;
-        continue;
-      }
-
-      if (t.type === "expense") expenses++;
-    }
-
-    return { expenses, payments, refunds, total: (rows || []).length };
-  }, []);
 
   useEffect(() => {
     const p = profiles[profile];
@@ -397,7 +360,7 @@ const SmartTransactionImport = ({
       if (!isPayment) return t;
 
       const creditAccounts = (accounts || []).filter((a) => a.account_type === "credit");
-     // if (creditAccounts.length === 0) return t;
+      if (creditAccounts.length === 0) return t;
 
       // Try to match by institution/name keywords
       const pickByKeyword = (kw) => creditAccounts.find((a) => String(a.name || "").toLowerCase().includes(kw) || String(a.institution || "").toLowerCase().includes(kw));
@@ -414,9 +377,7 @@ const SmartTransactionImport = ({
         if (bankAccounts.length === 1) target = bankAccounts[0];
       }
 
-      if (!target) {
-   	return { ...t, transaction_type: "transfer", transfer_account_id: null };
-	 }
+      if (!target) return t;
 
       return {
         ...t,
@@ -428,24 +389,20 @@ const SmartTransactionImport = ({
   );
 
   const rebuildPreview = useCallback(() => {
-  try {
-    setError(null);
-    if (!dataRows.length || !headers.length) {
+    try {
+      setError(null);
+      if (!dataRows.length || !headers.length) {
+        setPreview([]);
+        return;
+      }
+      const p = dataRows.slice(0, 10).map((r) => detectTransferForRow(buildRowObj(r)));
+      setPreview(p);
+    } catch (e) {
+      console.error("[import] preview failed", e);
+      setError("Could not build preview. Check mapping + CSV format.");
       setPreview([]);
-      setImportSummary(null);
-      return;
     }
-    const p = dataRows.slice(0, 10).map((r) => detectTransferForRow(buildRowObj(r)));
-    setPreview(p);
-    setImportSummary(computeImportSummary(p)); // ✅ add this
-  } catch (e) {
-    console.error("[import] preview failed", e);
-    setError("Could not build preview. Check mapping + CSV format.");
-    setPreview([]);
-    setImportSummary(null); // ✅ add this
-  }
-}, [dataRows, headers, buildRowObj, detectTransferForRow, computeImportSummary]);
-
+  }, [dataRows, headers, buildRowObj, detectTransferForRow]);
 
   useEffect(() => {
     rebuildPreview();
@@ -480,7 +437,6 @@ const SmartTransactionImport = ({
     const rows = dataRows
       .map((r) => detectTransferForRow(buildRowObj(r)))
       .filter((t) => t.description || t.amount);
-      setImportSummary(computeImportSummary(rows));
 
     onImport(rows);
     setRawRows([]);
@@ -608,14 +564,6 @@ const SmartTransactionImport = ({
           </div>
         </div>
       )}
-{importSummary && (
-  <div className="mt-2 text-sm text-gray-700">
-    <span className="font-semibold">Import Summary:</span>{" "}
-    {importSummary.expenses} expenses,{" "}
-    {importSummary.payments} payments,{" "}
-    {importSummary.refunds} refunds
-  </div>
-)}
 
       <div className="mt-4 flex items-center justify-between">
         <div className="text-xs text-gray-500">
@@ -628,12 +576,6 @@ const SmartTransactionImport = ({
         >
           Import
         </button>
-	<button
-    	  onClick={resetImport}
-    	  className="border px-4 py-2 rounded hover:bg-gray-100"
-  	>
-    	  Cancel
-  	</button>
       </div>
     </div>
   );
@@ -1807,17 +1749,10 @@ const looksLikeFeeOrInterest = (desc = "") => {
   return d.includes("INTEREST") || d.includes("FEE");
 };
 
-const NOT_PAYMENT_KEYWORDS = [
-  "PAYMENTUS",        // merchant names
-  "PAYMENT SERVICE",
-];
-
 const looksLikeCardPayment = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  if (NOT_PAYMENT_KEYWORDS.some((k) => d.includes(k))) return false;
+  const d = desc.toUpperCase();
   return PAYMENT_KEYWORDS.some((k) => d.includes(k));
 };
-
 
 const normalizeImportedRow = (r, acctById, selectedPerson) => {
   const amountNum = Number(r.amount || 0);
