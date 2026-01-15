@@ -48,7 +48,6 @@ import {
   cancelEditAssetHelper,
   saveEditAssetHelper,
 } from "./helpers/assetHelpers";
-import { ArrowLeftRight } from "lucide-react";
 
 // -----------------------------------------------------------------------------
 // Simple storage helper
@@ -305,17 +304,6 @@ const SmartTransactionImport = ({
           category: "Category",
         },
       },
-        dcu_checking: {
-  	label: "DCU (checking/savings)",
-  	defaults: {
-    	date: "DATE",
-    	description: "DESCRIPTION",
-    	amount: "AMOUNT",
-    	type: "TRANSACTION TYPE",
-    	category: "Category", // or leave as your default
-  	},
-      },
-
     }),
     []
   );
@@ -3357,33 +3345,22 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
     );
   }
 
-const excludedTransfersTotal = filteredTransactions
-  .filter((t) => (t.transaction_type || "normal") === "transfer")
-  .reduce((sum, t) => sum + Math.abs(Number(t.amount || 0)), 0);
-
-// Dashboard: treat transfers as money-movement, not spending
-const dashboardTransactions = filteredTransactions.filter(
-  (t) => (t.transaction_type || "normal") !== "transfer"
-);
-
-// For “spending” insights specifically
-const dashboardExpenseTxns = dashboardTransactions.filter((t) => t.type === "expense");
-
   // Category totals for donut chart
- const categoryTotals = dashboardExpenseTxns.reduce((acc, t) => {
-  const cat = t.category || "Uncategorized";
-  acc[cat] = (acc[cat] || 0) + Number(t.amount || 0);
-  return acc;
-}, {});
-
+  const categoryTotals = filteredTransactions
+    .filter((t) => t.type === "expense")
+    .reduce((acc, t) => {
+      acc[t.category] = (acc[t.category] || 0) + t.amount;
+      return acc;
+    }, {});
 
   // Monthly spending totals
-  const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
-  const month = String(t.date || "").slice(0, 7) || "Unknown";
-  acc[month] = (acc[month] || 0) + Number(t.amount || 0);
-  return acc;
-}, {});
-
+  const monthlyTotals = filteredTransactions
+    .filter((t) => t.type === "expense")
+    .reduce((acc, t) => {
+      const month = t.date.slice(0, 7);
+      acc[month] = (acc[month] || 0) + t.amount;
+      return acc;
+    }, {});
 
   // Net worth history (fake initial values, expands once you add history)
   const netWorthHistory = [
@@ -3470,7 +3447,7 @@ const dashboardExpenseTxns = dashboardTransactions.filter((t) => t.type === "exp
         {/* DASHBOARD TAB */}
         {activeTab === "dashboard" && (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-white rounded-lg shadow p-6">
                 <div className="flex items-center justify-between">
                   <div>
@@ -3498,6 +3475,18 @@ const dashboardExpenseTxns = dashboardTransactions.filter((t) => t.type === "exp
               <div className="bg-white rounded-lg shadow p-6">
                 <div className="flex items-center justify-between">
                   <div>
+                    <p className="text-gray-600 text-sm">Net Worth</p>
+                    <p className="text-2xl font-bold text-indigo-600">
+                      ${netWorth.toLocaleString()}
+                    </p>
+                  </div>
+                  <Wallet className="text-indigo-600" size={32} />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow p-6">
+                <div className="flex items-center justify-between">
+                  <div>
                     <p className="text-gray-600 text-sm">Balance</p>
                     <p className="text-2xl font-bold text-blue-600">
                       ${(totalIncome - totalExpenses).toLocaleString()}
@@ -3506,32 +3495,7 @@ const dashboardExpenseTxns = dashboardTransactions.filter((t) => t.type === "exp
                   <DollarSign className="text-blue-600" size={32} />
                 </div>
               </div>
-
-	  <div className="bg-white rounded-lg shadow p-6">
-              <div className="flex items-start justify-between">
-     		<div>
-      		  <p className="text-gray-600 text-sm">Transfers/Payments (excluded from txns.)</p>
-      		  <p className="text-2xl font-bold text-gray-700">
-        	    ${excludedTransfersTotal.toLocaleString()}
-      		  </p>
-    		</div>
-    		<ArrowLeftRight className="text-gray-700" size={32} />
-  	     </div>
-	  </div>
-   	    <div className="bg-white rounded-lg shadow p-6">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <p className="text-gray-600 text-sm">Net Worth</p>
-                    <p className="text-2xl font-bold text-indigo-600">
-                      ${netWorth.toLocaleString()}
-                    </p>
-                  </div>
-                  <Wallet className="text-indigo-600" size={32} />
-                </div>
             </div>
-
-            </div>
-
 
             <div className="flex gap-2 mb-4">
               {[
@@ -3666,52 +3630,33 @@ const dashboardExpenseTxns = dashboardTransactions.filter((t) => t.type === "exp
                   Recent Transactions
                 </h2>
                 <div className="space-y-2">
-{filteredTransactions
-  .slice(-5)
-  .reverse()
-  .map((t) => {
-    const isTransfer = (t.transaction_type || "normal") === "transfer";
-    const isIncome = t.type === "income";
-
-    return (
-      <div key={t.id} className="flex justify-between items-center">
-        <div>
-          <div className="flex items-center gap-2">
-            <p className="font-medium">{t.description}</p>
-
-            {t.recurring_rule_id ? (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
-                Recurring
-              </span>
-            ) : null}
-
-            {isTransfer ? (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-gray-100 text-gray-700">
-                Transfer
-              </span>
-            ) : null}
-          </div>
-
-          <p className="text-xs text-gray-500">
-            {t.date} • {personLabels[t.person]}
-          </p>
-        </div>
-
-        <span
-          className={`font-bold ${
-            isTransfer
-              ? "text-gray-700"
-              : isIncome
-              ? "text-green-600"
-              : "text-red-600"
-          }`}
-        >
-          {isTransfer ? "" : isIncome ? "+" : "-"}${Number(t.amount).toFixed(2)}
-        </span>
-      </div>
-    );
-  })}
-
+                  {filteredTransactions
+                    .slice(-5)
+                    .reverse()
+                    .map((t) => (
+                      <div key={t.id} className="flex justify-between items-center">
+                        <div>
+                          <div className="flex items-center gap-2">
+  			   <p className="font-medium">{t.description}</p>
+  			   {t.recurring_rule_id ? (
+    			   <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
+      				Recurring
+     			   </span>
+  			) : null}
+			</div>
+                          <p className="text-xs text-gray-500">
+                            {t.date} • {personLabels[t.person]}
+                          </p>
+                        </div>
+                        <span
+                          className={`font-bold ${
+                            t.type === "income" ? "text-green-600" : "text-red-600"
+                          }`}
+                        >
+                          {t.type === "income" ? "+" : "-"}${t.amount}
+                        </span>
+                      </div>
+                    ))}
                 </div>
               </div>
             </div>
