@@ -312,7 +312,7 @@ const SmartTransactionImport = ({
     	description: "DESCRIPTION",
     	amount: "AMOUNT",
     	type: "TRANSACTION TYPE",
-    	category: "Category", // or leave as your default
+    	category: "__none__",
   	},
       },
 
@@ -371,7 +371,9 @@ const SmartTransactionImport = ({
       const descIdx = idxOf(mapping.description);
       const amtIdx = idxOf(mapping.amount);
       const typeIdx = idxOf(mapping.type);
-      const catIdx = idxOf(mapping.category);
+      const catIdx = mapping.category && mapping.category !== "__none__"
+    ? idxOf(mapping.category)
+    : -1;
 
       const rawDate = dateIdx >= 0 ? row[dateIdx] : "";
       const rawDesc = descIdx >= 0 ? row[descIdx] : "";
@@ -387,7 +389,7 @@ const SmartTransactionImport = ({
         date: tryParseDate(rawDate) || new Date().toISOString().slice(0, 10),
         description: String(rawDesc || "").trim(),
         category: String(rawCat || "Uncategorized").trim() || "Uncategorized",
-        amount: Math.abs(signed),
+        amount: signed,
         type,
         person: selectedPerson || "joint",
         account_id: sourceAccountId ? Number(sourceAccountId) : null,
@@ -398,46 +400,235 @@ const SmartTransactionImport = ({
     [headers, mapping, selectedPerson, sourceAccountId]
   );
 
-  const detectTransferForRow = useCallback(
-    (t) => {
-      if (!detectTransfers) return t;
-      const desc = String(t.description || "").toLowerCase();
-      const src = accounts?.find((a) => String(a.id) === String(t.account_id));
-      if (!src) return t;
+const PAYMENT_KEYWORDS = [
+  "PAYMENT",
+  "AUTOPAY",
+  "BOA",
+  "THANK YOU",
+  "ONLINE PAYMENT",
+  "MOBILE PAYMENT",
+  "E-PAYMENT",
+  "EPAYMENT",
+  "E PAYMENT",
+  "CC PAYMENT",
+  "CREDIT CARD",
+  "CARD PAYMENT",
+  "GSBANKPAYMENT",
+  "APPLECARD",
+  "VISA PAYMENT",
+  "MASTERCARD PAYMENT",
+  "DISCOVER E-PAYMENT",
+  "AMERICANEXPRESS",
+  "CAPITAL ONE",
+  "CAPITALONE",
+  "LOAN PAYMENT",
+  "TRANSFER",
+];
 
-      const isPayment = /\b(payment|autopay|pay\s+to|cc\s+payment)\b/.test(desc);
-      if (!isPayment) return t;
+const NOT_PAYMENT_KEYWORDS = [
+  "PAYMENTUS",        // merchant names
+  "PAYMENT SERVICE",
+];
 
-      const creditAccounts = (accounts || []).filter((a) => a.account_type === "credit");
-     // if (creditAccounts.length === 0) return t;
+const looksLikeUtility = (desc="") => {
+  const d = desc.toUpperCase();
+  return [
+    "WASHINGTON GAS",
+    "PEPCO",
+    "BGE",
+    "VERIZON",
+    "COMCAST",
+    "XFINITY",
+    "AT&T",
+    "T-MOBILE",
+    "T MOBILE",
+  ].some(k => d.includes(k));
+};
 
-      // Try to match by institution/name keywords
-      const pickByKeyword = (kw) => creditAccounts.find((a) => String(a.name || "").toLowerCase().includes(kw) || String(a.institution || "").toLowerCase().includes(kw));
-      let target = null;
+const findAccountByKeywords = (accounts, keywords) => {
+  const ks = (keywords || []).map(k => String(k).toLowerCase());
+  return (accounts || []).find(a => {
+    const hay = `${a.name || ""} ${a.institution || ""}`.toLowerCase();
+    return ks.some(k => hay.includes(k));
+  }) || null;
+};
 
-      if (desc.includes("amex") || desc.includes("american express")) target = pickByKeyword("amex") || pickByKeyword("american");
-      if (!target && (desc.includes("chase") || desc.includes("jp morgan"))) target = pickByKeyword("chase") || pickByKeyword("jpm");
+const looksLikePayment = (desc = "") => {
+  const d = String(desc || "").toUpperCase();
+  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
+};
+const looksLikeFeeOrInterest = (desc = "") => {
+  const d = String(desc || "").toUpperCase();
+  return d.includes("INTEREST") || d.includes("FEE");
+};
 
-      if (!target && creditAccounts.length === 1) target = creditAccounts[0];
 
-      // If importing from a credit account itself, assume the counterparty is a bank/checking.
-      if (src.account_type === "credit") {
-        const bankAccounts = (accounts || []).filter((a) => a.account_type !== "credit");
-        if (bankAccounts.length === 1) target = bankAccounts[0];
+const looksLikeCardPayment = (desc = "") => {
+  const d = String(desc || "").toUpperCase();
+  if (NOT_PAYMENT_KEYWORDS.some((k) => d.includes(k))) return false;
+  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
+};
+
+const detectTransferForRow = useCallback(
+  (t) => {
+    if (!detectTransfers) return t;
+
+    const src = accounts?.find((a) => String(a.id) === String(t.account_id));
+    if (!src) return t;
+
+    const raw = String(t.description || "");
+    const d = raw.toUpperCase();
+
+    // ----------------------------
+    // Institution alias dictionary
+    // ----------------------------
+    const INSTITUTION_ALIASES = [
+      { key: "amex",     keywords: ["AMEX", "AMERICAN EXPRESS", "AMERICANEXPRESS"] },
+      { key: "chase",    keywords: ["CHASE", "JPM", "JPMCB", "JP MORGAN", "JPMORGAN"] },
+      { key: "cap1",     keywords: ["CAPITAL ONE", "CAPITALONE", "CAP1", "C1", "VENTURE X", "QUICKSILVER", "SAVOR", "360"] },
+      { key: "bofa",     keywords: ["BANK OF AMERICA", "BOFA", "BOA", "MERRILL"] },
+      { key: "discover", keywords: ["DISCOVER", "DI"] },
+      { key: "citi",     keywords: ["CITI", "CITIBANK", "CBNA"] },
+      { key: "wells",    keywords: ["WELLS FARGO", "WF"] },
+      { key: "usbank",   keywords: ["U.S. BANK", "US BANK", "USB"] },
+      { key: "barclays", keywords: ["BARCLAYS", "BCUS"] },
+      { key: "sync",     keywords: ["SYNCHRONY", "SYNCB"] },
+      { key: "dcu",      keywords: ["DCU", "DIGITAL FEDERAL"] },
+      // Apple Card / Goldman patterns (not in your list but commonly needed)
+      { key: "apple",    keywords: ["APPLECARD", "APPLE CARD", "GSBANKPAYMENT", "GOLDMAN"] },
+    ];
+
+    const looksLikeUtilityOrMerchantPayment = () => {
+      const blocked = [
+        "WASHINGTON GAS",
+        "PEPCO",
+        "BGE",
+        "VERIZON",
+        "COMCAST",
+        "XFINITY",
+        "AT&T",
+        "T-MOBILE",
+        "TMOBILE",
+        "WATER",
+        "ELECTRIC",
+        "UTILITY",
+      ];
+      return blocked.some((k) => d.includes(k));
+    };
+
+    // Broader “payment-ish” detector than plain PAYMENT_KEYWORDS
+    const looksPaymentish = () => {
+      const tokens = [
+        "PAYMENT",
+        "AUTOPAY",
+        "THANK YOU",
+        "ONLINE PAYMENT",
+        "MOBILE PAYMENT",
+        "E-PAYMENT",
+        "EPAYMENT",
+        "E PAYMENT",
+        "CC PAYMENT",
+        "CARD PAYMENT",
+        "CREDIT CARD",
+        "GSBANKPAYMENT",
+        "APPLECARD",
+        "VISA PAYMENT",
+        "MASTERCARD PAYMENT",
+        "LOAN PAYMENT",
+        "TRANSFER",
+      ];
+      // If only “TRANSFER” appears with no other payment word, stay conservative
+      const hasTransfer = d.includes("TRANSFER");
+      const hasOther = tokens
+        .filter((x) => x !== "TRANSFER")
+        .some((k) => d.includes(k));
+      if (hasTransfer && !hasOther) return false;
+
+      return tokens.some((k) => d.includes(k));
+    };
+
+    const findAccountByAliasKey = (aliasKey) => {
+      if (!aliasKey) return null;
+      const haystack = (accounts || []).map((a) => ({
+        a,
+        text: `${a.name || ""} ${a.institution || ""}`.toUpperCase(),
+      }));
+
+      // Prefer credit cards for payment targets
+      const creditFirst = haystack
+        .filter(({ a }) => a.account_type === "credit")
+        .concat(haystack.filter(({ a }) => a.account_type !== "credit"));
+
+      // Match by alias key appearing in name/institution (amex, chase, etc.)
+      const byKey = creditFirst.find(({ text }) => text.includes(aliasKey.toUpperCase()));
+      if (byKey) return byKey.a;
+
+      // Otherwise match by raw keywords that appear in the description
+      // (example: desc includes JPMCB → match account name/institution containing JPMCB)
+      const alias = INSTITUTION_ALIASES.find((x) => x.key === aliasKey);
+      if (!alias) return null;
+
+      for (const kw of alias.keywords) {
+        const hit = creditFirst.find(({ text }) => text.includes(kw));
+        if (hit) return hit.a;
       }
+      return null;
+    };
 
-      if (!target) {
-   	return { ...t, transaction_type: "transfer", transfer_account_id: null };
-	 }
+    const detectAliasFromDescription = () => {
+      for (const inst of INSTITUTION_ALIASES) {
+        if (inst.keywords.some((kw) => d.includes(kw))) return inst.key;
+      }
+      return null;
+    };
 
-      return {
-        ...t,
-        transaction_type: "transfer",
-        transfer_account_id: Number(target.id),
-      };
-    },
-    [accounts, detectTransfers]
-  );
+    // -----------------------------------------
+    // 1) CREDIT CARD SOURCE: payment in file => transfer
+    // -----------------------------------------
+    if (src.account_type === "credit") {
+      if (looksPaymentish()) {
+        return { ...t, transaction_type: "transfer" };
+      }
+      return t;
+    }
+
+    // -----------------------------------------
+    // 2) BANK SOURCE: only tag if (payment-ish AND not utility AND target known)
+    // -----------------------------------------
+    if (!looksPaymentish()) return t;
+    if (looksLikeUtilityOrMerchantPayment()) return t;
+
+    const creditAccounts = (accounts || []).filter((a) => a.account_type === "credit");
+    if (creditAccounts.length === 0) return t;
+
+    // Try to infer which institution the payment is going to
+    const aliasKey = detectAliasFromDescription();
+
+    let target = null;
+    if (aliasKey) {
+      target = findAccountByAliasKey(aliasKey);
+    }
+
+    // If still not found but only one credit account exists, safe fallback
+    if (!target && creditAccounts.length === 1) target = creditAccounts[0];
+
+    // If we can't map confidently, don't misclassify
+    if (!target) return t;
+
+    // avoid “self-transfer”
+    if (Number(target.id) === Number(src.id)) return t;
+
+    return {
+      ...t,
+      transaction_type: "transfer",
+      transfer_account_id: Number(target.id),
+    };
+  },
+  [accounts, detectTransfers]
+);
+
+
+
 
   const rebuildPreview = useCallback(() => {
   try {
@@ -452,6 +643,9 @@ const SmartTransactionImport = ({
     setImportSummary(computeImportSummary(p)); // ✅ add this
   } catch (e) {
     console.error("[import] preview failed", e);
+	console.log("[import] headers:", parsed?.[0]);
+	console.log("[import] first data row:", parsed?.[1]);
+
     setError("Could not build preview. Check mapping + CSV format.");
     setPreview([]);
     setImportSummary(null); // ✅ add this
@@ -498,6 +692,7 @@ const SmartTransactionImport = ({
     setRawRows([]);
     setFileName("");
   };
+const OPTIONAL_FIELDS = new Set(["category", "type"]);
 
   return (
     <div className="border rounded-lg p-4 bg-white">
@@ -569,17 +764,26 @@ const SmartTransactionImport = ({
           ].map(([key, label]) => (
             <div key={key}>
               <label className="text-xs text-gray-500">{label} column</label>
-              <select
-                value={mapping[key]}
-                onChange={(e) => setMapping((m) => ({ ...m, [key]: e.target.value }))}
-                className="border rounded px-3 py-2 w-full"
-              >
-                {headers.map((h, idx) => (
-                  <option key={`${key}-${idx}`} value={h}>
-                    {h || `Column ${idx + 1}`}
-                  </option>
-                ))}
-              </select>
+<select
+  value={mapping[key]}
+  onChange={(e) =>
+    setMapping((m) => ({ ...m, [key]: e.target.value }))
+  }
+  className="border rounded px-3 py-2 w-full"
+>
+  {OPTIONAL_FIELDS.has(key) && (
+    <option value="__none__">
+      (none – infer from amount)
+    </option>
+  )}
+
+  {headers.map((h, idx) => (
+    <option key={`${key}-${idx}`} value={h}>
+      {h || `Column ${idx + 1}`}
+    </option>
+  ))}
+</select>
+
             </div>
           ))}
         </div>
@@ -604,7 +808,7 @@ const SmartTransactionImport = ({
                   <tr key={idx} className="border-t">
                     <td className="px-3 py-2">{t.date}</td>
                     <td className="px-3 py-2">{t.description}</td>
-                    <td className="px-3 py-2 text-right">${Number(t.amount || 0).toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right">${Math.abs(Number(t.amount || 0)).toLocaleString()}</td>
                     <td className="px-3 py-2">{t.type}</td>
                     <td className="px-3 py-2">
                       {t.transaction_type === "transfer" ? (
@@ -896,17 +1100,6 @@ const [editProjectDraft, setEditProjectDraft] = useState(null);
     "Shopping",
     "Other",
   ];
-
-  const PAYMENT_KEYWORDS = [
-  "PAYMENT",
-  "AUTOPAY",
-  "THANK YOU",
-  "ONLINE PAYMENT",
-  "MOBILE PAYMENT",
-  "E-PAYMENT",
-  "ACH PAYMENT",
- ];
-
 
  // Budget categories use the same category list
  const budgetCategories = categories;
@@ -1809,27 +2002,6 @@ const projectFilesByProjectId = useMemo(() => {
 //   ---------------------------------------
 //   Payments Helpers
 //   ---------------------------------------
-
- const looksLikePayment = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
-};
-const looksLikeFeeOrInterest = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  return d.includes("INTEREST") || d.includes("FEE");
-};
-
-const NOT_PAYMENT_KEYWORDS = [
-  "PAYMENTUS",        // merchant names
-  "PAYMENT SERVICE",
-];
-
-const looksLikeCardPayment = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  if (NOT_PAYMENT_KEYWORDS.some((k) => d.includes(k))) return false;
-  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
-};
-
 
 const normalizeImportedRow = (r, acctById, selectedPerson) => {
   const amountNum = Number(r.amount || 0);
