@@ -243,140 +243,6 @@ const tryParseDate = (v) => {
   return "";
 };
 
-const PAYMENT_KEYWORDS = [
-  "PAYMENT",
-  "AUTOPAY",
-  "BOA",
-  "THANK YOU",
-  "ONLINE PAYMENT",
-  "MOBILE PAYMENT",
-  "E-PAYMENT",
-  "EPAYMENT",
-  "E PAYMENT",
-  "CC PAYMENT",
-  "CREDIT CARD",
-  "CARD PAYMENT",
-  "GSBANKPAYMENT",
-  "APPLECARD",
-  "VISA PAYMENT",
-  "MASTERCARD PAYMENT",
-  "DISCOVER E-PAYMENT",
-  "AMERICANEXPRESS",
-  "CAPITAL ONE",
-  "CAPITALONE",
-  "LOAN PAYMENT",
-  "TRANSFER",
-];
-
-const NOT_PAYMENT_KEYWORDS = [
-  "PAYMENTUS",        // merchant names
-  "PAYMENT SERVICE",
-];
-
-const looksLikeUtility = (desc="") => {
-  const d = desc.toUpperCase();
-  return [
-    "WASHINGTON GAS",
-    "PEPCO",
-    "BGE",
-    "VERIZON",
-    "COMCAST",
-    "XFINITY",
-    "AT&T",
-    "T-MOBILE",
-    "T MOBILE",
-  ].some(k => d.includes(k));
-};
-const looksLikePayment = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  if (NOT_PAYMENT_KEYWORDS.some((k) => d.includes(k))) return false;
-  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
-};
-
-const looksLikeFeeOrInterest = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  return d.includes("INTEREST") || d.includes("FEE");
-};
-
-//   ---------------------------------------
-//   Payments Helpers
-//   ---------------------------------------
-
-const normalizeImportedRow = (r, acctById, selectedPerson) => {
-  const amountNum = Number(r.amount || 0);
-  const person = r.person || selectedPerson || "joint";
-
-  const acct = r.account_id != null ? acctById.get(Number(r.account_id)) : null;
-  const isCredit = acct?.account_type === "credit";
-
-  // Trust explicit transfer rows coming from the importer
-  if (r.transaction_type === "transfer") {
-    return { ...r, person, amount: amountNum };
-  }
-
-  // CREDIT CARD RULES
-  if (isCredit) {
-    const desc = String(r.description || "");
-
-    // ✅ Payments: Chase may export payments as POSITIVE, Amex often NEGATIVE.
-    // So: if it looks like a payment by description, treat as TRANSFER regardless of sign.
-    if (looksLikePayment(desc) && !looksLikeUtility(desc)) {
-      return {
-        ...r,
-        person,
-        transaction_type: "transfer",
-        type: "expense", // transfers excluded anyway
-        amount: -Math.abs(amountNum), // on the card account, payment reduces balance
-        category: r.category || "Other",
-      };
-    }
-
-    // ✅ Fees/interest should be expenses
-    if (looksLikeFeeOrInterest(desc)) {
-      return {
-        ...r,
-        person,
-        transaction_type: "normal",
-        type: "expense",
-        amount: -Math.abs(amountNum),
-        category: r.category || "Fees & Adjustments",
-      };
-    }
-
-    // ✅ Default for credit card rows = purchase expense (fixes AMEX market charge)
-    // Purchases sometimes appear positive (balance increases) or negative (some exports).
-    return {
-      ...r,
-      person,
-      transaction_type: "normal",
-      type: "expense",
-      amount: -Math.abs(amountNum),
-    };
-  }
-
-  // NON-CREDIT (checking/savings) RULES
-  if (amountNum > 0) {
-    return {
-      ...r,
-      person,
-      amount: Math.abs(amountNum),
-      type: "income",
-      transaction_type: "normal",
-    };
-  }
-  if (amountNum < 0) {
-    return {
-      ...r,
-      person,
-      amount: -Math.abs(amountNum),
-      type: "expense",
-      transaction_type: "normal",
-    };
-  }
-
-  return { ...r, person, amount: amountNum };
-};
-
 const SmartTransactionImport = ({
   accounts,
   selectedPerson,
@@ -536,7 +402,60 @@ const SmartTransactionImport = ({
     [headers, mapping, selectedPerson, sourceAccountId]
   );
 
+const PAYMENT_KEYWORDS = [
+  "PAYMENT",
+  "AUTOPAY",
+  "BOA",
+  "THANK YOU",
+  "ONLINE PAYMENT",
+  "MOBILE PAYMENT",
+  "E-PAYMENT",
+  "EPAYMENT",
+  "E PAYMENT",
+  "CC PAYMENT",
+  "CREDIT CARD",
+  "CARD PAYMENT",
+  "GSBANKPAYMENT",
+  "APPLECARD",
+  "VISA PAYMENT",
+  "MASTERCARD PAYMENT",
+  "DISCOVER E-PAYMENT",
+  "AMERICANEXPRESS",
+  "CAPITAL ONE",
+  "CAPITALONE",
+  "LOAN PAYMENT",
+  "TRANSFER",
+];
 
+const NOT_PAYMENT_KEYWORDS = [
+  "PAYMENTUS",        // merchant names
+  "PAYMENT SERVICE",
+];
+
+const looksLikeUtility = (desc="") => {
+  const d = desc.toUpperCase();
+  return [
+    "WASHINGTON GAS",
+    "PEPCO",
+    "BGE",
+    "VERIZON",
+    "COMCAST",
+    "XFINITY",
+    "AT&T",
+    "T-MOBILE",
+    "T MOBILE",
+  ].some(k => d.includes(k));
+};
+const looksLikePayment = (desc = "") => {
+  const d = String(desc || "").toUpperCase();
+  if (NOT_PAYMENT_KEYWORDS.some((k) => d.includes(k))) return false;
+  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
+};
+
+const looksLikeFeeOrInterest = (desc = "") => {
+  const d = String(desc || "").toUpperCase();
+  return d.includes("INTEREST") || d.includes("FEE");
+};
 const findAccountByKeywords = (accounts, keywords) => {
   const ks = (keywords || []).map(k => String(k).toLowerCase());
   return (accounts || []).find(a => {
@@ -582,7 +501,84 @@ const buildAccountTokens = (acct) => {
   return new Set([base, ...alias].filter(Boolean));
 };
 
+//   ---------------------------------------
+//   Payments Helpers
+//   ---------------------------------------
 
+const normalizeImportedRow = (r, acctById, selectedPerson) => {
+  const amountNum = Number(r.amount || 0);
+  const person = r.person || selectedPerson || "joint";
+
+  const acct = r.account_id != null ? acctById.get(Number(r.account_id)) : null;
+  const isCredit = acct?.account_type === "credit";
+
+  // Trust explicit transfer rows coming from the importer
+  if (r.transaction_type === "transfer") {
+    return { ...r, person, amount: amountNum };
+  }
+
+  // CREDIT CARD RULES
+  if (isCredit) {
+    const desc = String(r.description || "");
+
+    // ✅ Payments: Chase may export payments as POSITIVE, Amex often NEGATIVE.
+    // So: if it looks like a payment by description, treat as TRANSFER regardless of sign.
+    if (looksLikePayment(desc)) {
+      return {
+        ...r,
+        person,
+        transaction_type: "transfer",
+        type: "expense", // transfers excluded anyway
+        amount: -Math.abs(amountNum), // on the card account, payment reduces balance
+        category: r.category || "Other",
+      };
+    }
+
+    // ✅ Fees/interest should be expenses
+    if (looksLikeFeeOrInterest(desc)) {
+      return {
+        ...r,
+        person,
+        transaction_type: "normal",
+        type: "expense",
+        amount: -Math.abs(amountNum),
+        category: r.category || "Fees & Adjustments",
+      };
+    }
+
+    // ✅ Default for credit card rows = purchase expense (fixes AMEX market charge)
+    // Purchases sometimes appear positive (balance increases) or negative (some exports).
+    return {
+      ...r,
+      person,
+      transaction_type: "normal",
+      type: "expense",
+      amount: -Math.abs(amountNum),
+    };
+  }
+
+  // NON-CREDIT (checking/savings) RULES
+  if (amountNum > 0) {
+    return {
+      ...r,
+      person,
+      amount: Math.abs(amountNum),
+      type: "income",
+      transaction_type: "normal",
+    };
+  }
+  if (amountNum < 0) {
+    return {
+      ...r,
+      person,
+      amount: -Math.abs(amountNum),
+      type: "expense",
+      transaction_type: "normal",
+    };
+  }
+
+  return { ...r, person, amount: amountNum };
+};
 
 const normalizeCreditCardRow = (t, srcAcct) => {
   const desc = String(t.description || "");
@@ -1004,21 +1000,16 @@ const monthToDb = (monthKey) => {
 };
 
 const prevMonthKey = (monthKey) => {
-  const k = toMonthKey(monthKey);
-  if (!k) return "";
-  const [y, m] = k.split("-").map(Number);
-  const d = new Date(y, m - 2, 1);
+  const [y, m] = String(monthKey).split("-").map(Number);
+  const d = new Date(y, (m - 1) - 1, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
 
 const nextMonthKey = (monthKey) => {
-  const k = toMonthKey(monthKey);
-  if (!k) return "";
-  const [y, m] = k.split("-").map(Number);
-  const d = new Date(y, m, 1);
+  const [y, m] = String(monthKey).split("-").map(Number);
+  const d = new Date(y, (m - 1) + 1, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
-
 
 
 // Stable month label (avoid timezone shifting to prior month)
@@ -1657,29 +1648,21 @@ const openProjectFileRow = async (fileRow, projectName) => {
     transactionSearch,
   ]);
 
- const tableTotals = useMemo(() => {
+  const tableTotals = useMemo(() => {
   let income = 0;
   let expenses = 0;
 
-  const isTransfer = (t) => (t.transaction_type || "normal") === "transfer";
-  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-
   tableTransactions.forEach((t) => {
-    if (isTransfer(t)) return;
+    const isTransfer = (t.transaction_type || "normal") === "transfer";
+    if (isTransfer) return;
 
-    const amt = Math.abs(num(t.amount));
-
+    const amt = Math.abs(Number(t.amount || 0));
     if (t.type === "income") income += amt;
     if (t.type === "expense") expenses += amt;
   });
 
-  return {
-    income,
-    expenses,
-    net: income - expenses,
-  };
+  return { income, expenses, net: income - expenses };
 }, [tableTransactions]);
-
 
 
   const groupedTransactionsByMonth = useMemo(() => {
@@ -2483,62 +2466,56 @@ if (newProjectFiles?.length) {
 
 
 const addRecurringRule = async () => {
-  if (!session?.user?.id || !householdId) return;
+    if (!session?.user?.id || !householdId) return;
 
-  const description = String(newRecurring.description || "").trim();
-  const amountNum = Number(newRecurring.amount);
+    const description = newRecurring.description?.trim();
+    const amountNum = Number(newRecurring.amount);
 
-  if (!description) {
-    alert("Please enter a description for the recurring item.");
-    return;
-  }
+    if (!description) {
+      alert("Please enter a description for the recurring item.");
+      return;
+    }
+    if (!Number.isFinite(amountNum)) {
+      alert("Please enter a valid amount.");
+      return;
+    }
 
-  // Tighten validation: reject empty, NaN, 0, negatives
-  if (!Number.isFinite(amountNum) || amountNum <= 0) {
-    alert("Please enter an amount greater than 0.");
-    return;
-  }
+    const payload = {
+      household_id: householdId,
+      description,
+      category: newRecurring.category,
+      amount: amountNum,
+      type: newRecurring.type,
+      person: newRecurring.person,
+      frequency: "monthly",
+      day_of_month: Number(newRecurring.dayOfMonth) || 1,
+      start_date: null,
+      end_date: null,
+      active: true,
+      created_by: session.user.id,
+    };
 
-  const payload = {
-    household_id: householdId,
-    description,
-    category: newRecurring.category || "Uncategorized",
-    // Store recurring rule amount as positive; sign is applied later when generating transactions
-    amount: Math.abs(amountNum),
-    type: newRecurring.type || "expense",
-    person: newRecurring.person || "joint",
-    frequency: "monthly",
-    day_of_month: Number(newRecurring.dayOfMonth) || 1,
-    start_date: null,
-    end_date: null,
-    active: true,
-    created_by: session.user.id,
+    try {
+      const { data, error } = await supabase
+        .from("recurring_rules")
+        .insert(payload)
+        .select("*")
+        .single();
+
+      if (error) throw error;
+
+      setRecurringRules((prev) => [data, ...prev]);
+      setNewRecurring((prev) => ({
+        ...prev,
+        description: "",
+        amount: "",
+        dayOfMonth: 1,
+      }));
+    } catch (e) {
+      console.error("[db] addRecurringRule failed", e);
+      alert("Could not add recurring rule. Check console for details.");
+    }
   };
-
-  try {
-    const { data, error } = await supabase
-      .from("recurring_rules")
-      .insert(payload)
-      .select("*")
-      .single();
-
-    if (error) throw error;
-
-    setRecurringRules((prev) => [data, ...prev]);
-
-    // Clear fields you likely want to re-enter; keep category/type/person sticky
-    setNewRecurring((prev) => ({
-      ...(prev || {}),
-      description: "",
-      amount: "",
-      dayOfMonth: 1,
-    }));
-  } catch (e) {
-    console.error("[db] addRecurringRule failed", e);
-    alert("Could not add recurring rule. Check console for details.");
-  }
-};
-
 
 
   // ---------------------------------------------------------------------------
@@ -2982,7 +2959,7 @@ const monthTotals = useMemo(() => {
   if (!selectedMonth) return { income: 0, expenses: 0, net: 0 };
 
   const monthTxns = (transactionsByPerson || []).filter((t) =>
-    String(t.date || "").startsWith(selectedMonth)
+    (t.date || "").startsWith(selectedMonth)
   );
 
   let income = 0;
@@ -2990,16 +2967,13 @@ const monthTotals = useMemo(() => {
 
   for (const t of monthTxns) {
     if ((t.transaction_type || "normal") === "transfer") continue;
-
-    const amt = Math.abs(Number(t.amount || 0));
-
+    const amt = Number(t.amount || 0);
     if (t.type === "income") income += amt;
-    if (t.type === "expense") expenses += amt;
+    else expenses += amt;
   }
 
   return { income, expenses, net: income - expenses };
 }, [transactionsByPerson, selectedMonth]);
-
 
 const projectsQuoteSubtotal = useMemo(() => {
   return (projects ?? []).reduce((sum, p) => {
@@ -4539,87 +4513,7 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
         </table>
       </div>
 
-{/* ADD RECURRING RULE — keep inside recurringOpen */}
-<div className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
-  <input
-    type="text"
-    placeholder="Description"
-    value={newRecurring.description}
-    onChange={(e) =>
-      setNewRecurring((prev) => ({ ...(prev || {}), description: e.target.value }))
-    }
-    className="border rounded px-3 py-2"
-  />
-
-  <select
-    value={newRecurring.category}
-    onChange={(e) =>
-      setNewRecurring((prev) => ({ ...(prev || {}), category: e.target.value }))
-    }
-    className="border rounded px-3 py-2"
-  >
-    {categories.map((cat) => (
-      <option key={cat} value={cat}>
-        {cat}
-      </option>
-    ))}
-  </select>
-
-  <input
-    type="number"
-    placeholder="Amount"
-    value={newRecurring.amount}
-    onChange={(e) =>
-      setNewRecurring((prev) => ({ ...(prev || {}), amount: e.target.value }))
-    }
-    className="border rounded px-3 py-2"
-  />
-
-  <select
-    value={newRecurring.type}
-    onChange={(e) =>
-      setNewRecurring((prev) => ({ ...(prev || {}), type: e.target.value }))
-    }
-    className="border rounded px-3 py-2"
-  >
-    <option value="income">Income</option>
-    <option value="expense">Expense</option>
-  </select>
-
-  <select
-    value={newRecurring.person}
-    onChange={(e) =>
-      setNewRecurring((prev) => ({ ...(prev || {}), person: e.target.value }))
-    }
-    className="border rounded px-3 py-2"
-  >
-    <option value="joint">Joint</option>
-    <option value="you">You</option>
-    <option value="wife">Wife</option>
-  </select>
-
-  <input
-    type="number"
-    min={1}
-    max={31}
-    placeholder="Day"
-    value={newRecurring.dayOfMonth}
-    onChange={(e) =>
-      setNewRecurring((prev) => ({ ...(prev || {}), dayOfMonth: e.target.value }))
-    }
-    className="border rounded px-3 py-2"
-  />
-
-  <button
-    type="button"
-    onClick={addRecurringRule /* or createRecurringRule/addRecurringRuleDb */}
-    className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 flex items-center justify-center gap-2 md:col-span-6"
-  >
-    {/* If PlusCircle is not imported, remove this icon line */}
-    <PlusCircle size={18} /> Add Recurring Rule
-  </button>
-</div>
-
+      {/* Your existing "Add recurring" form stays below (keep or move) */}
       {/* (No change required unless you want an “Add New” collapse too.) */}
     </>
   )}
