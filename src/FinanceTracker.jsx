@@ -449,6 +449,27 @@ const SmartTransactionImport = ({
     	category: "__none__",
   	},
       },
+	truist_checking: {
+  	label: "Truist (checking/savings)",
+  	defaults: {
+    	date: "Transaction Date",
+    	description: "Full description",
+    	amount: "Amount",
+    	type: "Transaction Type",
+    	category: "Category name",
+  	},
+	},
+
+	suntrust_checking: {
+  	label: "Suntrust (legacy)",
+  	defaults: {
+    	date: "Transaction Date",
+    	description: "Full description",
+    	amount: "Amount",
+    	type: "Transaction Type",
+    	category: "Category name",
+  	},
+	},
 
     }),
     []
@@ -501,7 +522,13 @@ const SmartTransactionImport = ({
 
   const buildRowObj = useCallback(
     (row) => {
-      const idxOf = (colName) => headers.findIndex((h) => String(h).trim() === String(colName).trim());
+  const idxOf = (colName) => {
+  const target = String(colName || "").trim().toLowerCase();
+  return headers.findIndex(
+    (h) => String(h || "").trim().toLowerCase() === target
+  );
+  };
+
 
       const dateIdx = idxOf(mapping.date);
       const descIdx = idxOf(mapping.description);
@@ -578,7 +605,9 @@ const buildAccountTokens = (acct) => {
   if (blob.includes("discover")) alias.push("discover");
   if (blob.includes("apple")) alias.push("applecard", "apple card", "gsbankpayment", "gs bank");
   if (blob.includes("dcu") || blob.includes("digital federal")) alias.push("dcu", "digital federal");
-
+if (blob.includes("truist") || blob.includes("suntrust")) {
+  alias.push("truist", "suntrust");
+}
   return new Set([base, ...alias].filter(Boolean));
 };
 
@@ -984,6 +1013,21 @@ const sanitizeFileName = (name) => {
   }
 
   return cleaned || "quote";
+};
+
+//  --------------------------------------------------------------------------
+//  Category Trend Helpers
+//  --------------------------------------------------------------------------
+const lastNMonthKeys = (n = 6, fromDate = new Date()) => {
+  const out = [];
+  const d = new Date(fromDate.getFullYear(), fromDate.getMonth(), 1);
+  for (let i = 0; i < n; i++) {
+    const yy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    out.unshift(`${yy}-${mm}`); // oldest -> newest
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out;
 };
 
 
@@ -1724,6 +1768,71 @@ const openProjectFileRow = async (fileRow, projectName) => {
   if (!currentMonth) return;
   setOpenMonths(new Set([currentMonth]));
 }, [currentMonth]);
+
+const lastNMonthKeys = (n = 6) => {
+  const out = [];
+  const d = new Date();
+  d.setDate(1);
+
+  for (let i = 0; i < n; i++) {
+    const yy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    out.unshift(`${yy}-${mm}`);
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out;
+};
+
+
+//  --------------------------------------------------------------------------
+//  Category Core computation: category x month matrix + rollups
+//  --------------------------------------------------------------------------
+const categoryTrends = useMemo(() => {
+  const months = lastNMonthKeys(6);
+  const monthSet = new Set(months);
+  const byCategory = new Map();
+
+  for (const t of (transactionsByPerson || [])) {
+    if ((t.transaction_type || "normal") === "transfer") continue;
+    if (t.type !== "expense") continue;
+
+    const m = String(t.date || "").slice(0, 7);
+    if (!monthSet.has(m)) continue;
+
+    const cat = String(t.category || "Uncategorized").trim() || "Uncategorized";
+    const spend = Math.abs(Number(t.amount || 0));
+    if (!Number.isFinite(spend) || spend === 0) continue;
+
+    const row = byCategory.get(cat) || {};
+    row[m] = (row[m] || 0) + spend;
+    byCategory.set(cat, row);
+  }
+
+  const rows = Array.from(byCategory.entries()).map(([category, mobj]) => {
+    const series = months.map((m) => Number(mobj[m] || 0));
+    const total = series.reduce((a, b) => a + b, 0);
+
+    const cur = series[series.length - 1] || 0;
+    const prev = series[series.length - 2] || 0;
+    const delta = cur - prev;
+    const pct = prev > 0 ? (delta / prev) * 100 : (cur > 0 ? 100 : 0);
+
+    return { category, series, total, cur, prev, delta, pct };
+  });
+
+  rows.sort((a, b) => (b.cur - a.cur) || (b.total - a.total));
+
+  const top = rows.slice(0, 5);
+  const risers = [...rows]
+    .filter((r) => r.prev >= 25 || r.cur >= 25)
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, 5);
+
+  return { months, rows, top, risers };
+}, [transactionsByPerson]);
+
+
+
 
 //  ---------------------------------------
 // Map: { [projectId]: [fileRow, fileRow...] }
@@ -3689,27 +3798,37 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
 
           </div>
 
-          <div className="flex gap-2 border-b">
-            {["dashboard", "transactions", "assets", "liabilities", "budget", "projects"].map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`px-4 py-2 font-medium capitalize ${
-                  activeTab === tab
-                    ? "text-indigo-600 border-b-2 border-indigo-600"
-                    : "text-gray-600 hover:text-indigo-600"
-                }`}
-              >
-                {tab}
-              </button>
-            ))}
-            <button
-              onClick={clearAllData}
-              className="ml-auto px-4 py-2 text-sm text-red-600 hover:text-red-800"
-            >
-              Clear All Data
-            </button>
-          </div>
+<div className="flex gap-2 border-b">
+  {[
+    { key: "dashboard", label: "Dashboard" },
+    { key: "transactions", label: "Transactions" },
+    { key: "assets", label: "Assets" },
+    { key: "liabilities", label: "Liabilities" },
+    { key: "budget", label: "Budget" },
+    { key: "projects", label: "Projects" },
+    { key: "trends", label: "Trends" },
+  ].map(({ key, label }) => (
+    <button
+      key={key}
+      onClick={() => setActiveTab(key)}
+      className={`px-4 py-2 font-medium ${
+        activeTab === key
+          ? "text-indigo-600 border-b-2 border-indigo-600"
+          : "text-gray-600 hover:text-indigo-600"
+      }`}
+    >
+      {label}
+    </button>
+  ))}
+
+  <button
+    onClick={clearAllData}
+    className="ml-auto px-4 py-2 text-sm text-red-600 hover:text-red-800"
+  >
+    Clear All Data
+  </button>
+</div>
+
         </div>
 
         {/* DASHBOARD TAB */}
@@ -6368,6 +6487,130 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
 )}
    {/* End of Project Logic */}
 
+   {/* TREND TAB */}
+{activeTab === "trends" && (() => {
+  const lastTrendMonth =
+    categoryTrends.months?.[categoryTrends.months.length - 1];
+
+  return (
+    <div className="space-y-6">
+      {/* Category Trends */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-semibold">Category Trends</h2>
+          <div className="text-xs text-gray-500">
+            Last {categoryTrends.months.length} months
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Top categories */}
+          <div className="border rounded-lg p-4">
+            <div className="text-sm font-semibold mb-2 flex items-center justify-between">
+              <span>Top categories</span>
+              {lastTrendMonth && (
+                <span className="text-xs font-normal text-gray-500">
+                  {monthLabelFromKey(lastTrendMonth)}
+                </span>
+              )}
+            </div>
+
+<div className="space-y-2">
+  {categoryTrends.top.map((r) => {
+    const max = Math.max(...r.series, 1);
+
+    return (
+      <div key={r.category} className="py-3 border-b last:border-b-0">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="font-semibold truncate">{r.category}</div>
+              <div className="shrink-0 text-right font-semibold tabular-nums">
+                ${r.cur.toLocaleString()}
+              </div>
+            </div>
+
+           {/* Sparkline */}
+<div className="mt-1 h-5 flex items-end gap-1">
+  {r.series.map((v, idx) => {
+    const h = Math.round((v / max) * 18);
+    const isLast = idx === r.series.length - 1;
+
+    const barColor = isLast
+      ? r.delta >= 0
+        ? "bg-red-400"
+        : "bg-green-400"
+      : "bg-gray-300";
+
+    return (
+      <div
+        key={idx}
+        title={`${categoryTrends.months[idx]}: $${v.toLocaleString()}`}
+        className={`w-2 rounded-sm ${barColor} transition-all duration-500 ease-out`}
+        style={{
+          height: `${Math.max(2, h)}px`,
+          transitionDelay: `${idx * 40}ms`, // nice cascade
+        }}
+      />
+    );
+  })}
+</div>
+
+
+
+            <div className="mt-1 text-xs text-gray-500">
+              vs prev:{" "}
+              <span className="font-medium tabular-nums">
+                {r.delta >= 0 ? "+" : "-"}${Math.abs(r.delta).toLocaleString()}
+              </span>
+              {r.prev > 0 && (
+                <span className="ml-2">
+                  ({r.pct >= 0 ? "+" : ""}
+                  {Number.isFinite(r.pct) ? r.pct.toFixed(0) : "0"}%)
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  })}
+</div>
+
+          </div>
+
+          {/* Biggest increases */}
+          <div className="border rounded-lg p-4">
+            <div className="text-sm font-semibold mb-2">
+              Biggest increases (MoM)
+            </div>
+
+            <div className="space-y-2">
+              {categoryTrends.risers.map((r) => (
+                <div
+                  key={r.category}
+                  className="flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0 truncate font-medium">
+                    {r.category}
+                  </div>
+                  <div className="text-right font-semibold text-red-700">
+                    +${Math.max(0, r.delta).toLocaleString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+})()}
+
+
+   {/* End of TREND TAB */}
+
+
       </div>  {/* closes max-w-7xl mx-auto */}
     </div>  {/* closes min-h-screen div */}
     </div>  {/* closes blur/disable wrapper */}
@@ -6394,8 +6637,6 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
         />
       )}
     </div>
-        
-
   );
 };
 

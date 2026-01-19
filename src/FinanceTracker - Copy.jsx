@@ -48,6 +48,7 @@ import {
   cancelEditAssetHelper,
   saveEditAssetHelper,
 } from "./helpers/assetHelpers";
+import { ArrowLeftRight } from "lucide-react";
 
 // -----------------------------------------------------------------------------
 // Simple storage helper
@@ -242,6 +243,140 @@ const tryParseDate = (v) => {
   return "";
 };
 
+const PAYMENT_KEYWORDS = [
+  "PAYMENT",
+  "AUTOPAY",
+  "BOA",
+  "THANK YOU",
+  "ONLINE PAYMENT",
+  "MOBILE PAYMENT",
+  "E-PAYMENT",
+  "EPAYMENT",
+  "E PAYMENT",
+  "CC PAYMENT",
+  "CREDIT CARD",
+  "CARD PAYMENT",
+  "GSBANKPAYMENT",
+  "APPLECARD",
+  "VISA PAYMENT",
+  "MASTERCARD PAYMENT",
+  "DISCOVER E-PAYMENT",
+  "AMERICANEXPRESS",
+  "CAPITAL ONE",
+  "CAPITALONE",
+  "LOAN PAYMENT",
+  "TRANSFER",
+];
+
+const NOT_PAYMENT_KEYWORDS = [
+  "PAYMENTUS",        // merchant names
+  "PAYMENT SERVICE",
+];
+
+const looksLikeUtility = (desc="") => {
+  const d = desc.toUpperCase();
+  return [
+    "WASHINGTON GAS",
+    "PEPCO",
+    "BGE",
+    "VERIZON",
+    "COMCAST",
+    "XFINITY",
+    "AT&T",
+    "T-MOBILE",
+    "T MOBILE",
+  ].some(k => d.includes(k));
+};
+const looksLikePayment = (desc = "") => {
+  const d = String(desc || "").toUpperCase();
+  if (NOT_PAYMENT_KEYWORDS.some((k) => d.includes(k))) return false;
+  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
+};
+
+const looksLikeFeeOrInterest = (desc = "") => {
+  const d = String(desc || "").toUpperCase();
+  return d.includes("INTEREST") || d.includes("FEE");
+};
+
+//   ---------------------------------------
+//   Payments Helpers
+//   ---------------------------------------
+
+const normalizeImportedRow = (r, acctById, selectedPerson) => {
+  const amountNum = Number(r.amount || 0);
+  const person = r.person || selectedPerson || "joint";
+
+  const acct = r.account_id != null ? acctById.get(Number(r.account_id)) : null;
+  const isCredit = acct?.account_type === "credit";
+
+  // Trust explicit transfer rows coming from the importer
+  if (r.transaction_type === "transfer") {
+    return { ...r, person, amount: amountNum };
+  }
+
+  // CREDIT CARD RULES
+  if (isCredit) {
+    const desc = String(r.description || "");
+
+    // ✅ Payments: Chase may export payments as POSITIVE, Amex often NEGATIVE.
+    // So: if it looks like a payment by description, treat as TRANSFER regardless of sign.
+    if (looksLikePayment(desc) && !looksLikeUtility(desc)) {
+      return {
+        ...r,
+        person,
+        transaction_type: "transfer",
+        type: "expense", // transfers excluded anyway
+        amount: -Math.abs(amountNum), // on the card account, payment reduces balance
+        category: r.category || "Other",
+      };
+    }
+
+    // ✅ Fees/interest should be expenses
+    if (looksLikeFeeOrInterest(desc)) {
+      return {
+        ...r,
+        person,
+        transaction_type: "normal",
+        type: "expense",
+        amount: -Math.abs(amountNum),
+        category: r.category || "Fees & Adjustments",
+      };
+    }
+
+    // ✅ Default for credit card rows = purchase expense (fixes AMEX market charge)
+    // Purchases sometimes appear positive (balance increases) or negative (some exports).
+    return {
+      ...r,
+      person,
+      transaction_type: "normal",
+      type: "expense",
+      amount: -Math.abs(amountNum),
+    };
+  }
+
+  // NON-CREDIT (checking/savings) RULES
+  if (amountNum > 0) {
+    return {
+      ...r,
+      person,
+      amount: Math.abs(amountNum),
+      type: "income",
+      transaction_type: "normal",
+    };
+  }
+  if (amountNum < 0) {
+    return {
+      ...r,
+      person,
+      amount: -Math.abs(amountNum),
+      type: "expense",
+      transaction_type: "normal",
+    };
+  }
+
+  return { ...r, person, amount: amountNum };
+};
+
 const SmartTransactionImport = ({
   accounts,
   selectedPerson,
@@ -262,6 +397,15 @@ const SmartTransactionImport = ({
   const [detectTransfers, setDetectTransfers] = useState(true);
   const [preview, setPreview] = useState([]);
   const [error, setError] = useState(null);
+  const [importSummary, setImportSummary] = useState(null);
+
+  const resetImport = () => {
+  setRawRows([]);
+  setFileName("");
+  setPreview([]);
+  setImportSummary(null);
+  setError(null);
+  };
 
   const profiles = useMemo(
     () => ({
@@ -295,9 +439,71 @@ const SmartTransactionImport = ({
           category: "Category",
         },
       },
+        dcu_checking: {
+  	label: "DCU (checking/savings)",
+  	defaults: {
+    	date: "DATE",
+    	description: "DESCRIPTION",
+    	amount: "AMOUNT",
+    	type: "TRANSACTION TYPE",
+    	category: "__none__",
+  	},
+      },
+	truist_checking: {
+  	label: "Truist (checking/savings)",
+  	defaults: {
+    	date: "Transaction Date",
+    	description: "Full description",
+    	amount: "Amount",
+    	type: "Transaction Type",
+    	category: "Category name",
+  	},
+	},
+
+	suntrust_checking: {
+  	label: "Suntrust (legacy)",
+  	defaults: {
+    	date: "Transaction Date",
+    	description: "Full description",
+    	amount: "Amount",
+    	type: "Transaction Type",
+    	category: "Category name",
+  	},
+	},
+
     }),
     []
   );
+
+  // helper functions (put it here)
+  const computeImportSummary = useCallback((rows) => {
+  let expenses = 0;
+  let payments = 0;
+  let refunds = 0;
+
+  for (const t of rows || []) {
+    const isTransfer = (t.transaction_type || "normal") === "transfer";
+    if (isTransfer) {
+      payments++;
+      continue;
+    }
+
+    const desc = String(t.description || "").toLowerCase();
+    const looksRefundy =
+      /\b(refund|returned|return|reversal|chargeback)\b/.test(desc) ||
+      (t.type === "income");
+
+    if (looksRefundy) {
+      refunds++;
+      continue;
+    }
+
+    if (t.type === "expense") expenses++;
+  }
+
+  return { expenses, payments, refunds, total: (rows || []).length };
+}, []);
+
 
   useEffect(() => {
     const p = profiles[profile];
@@ -316,13 +522,21 @@ const SmartTransactionImport = ({
 
   const buildRowObj = useCallback(
     (row) => {
-      const idxOf = (colName) => headers.findIndex((h) => String(h).trim() === String(colName).trim());
+  const idxOf = (colName) => {
+  const target = String(colName || "").trim().toLowerCase();
+  return headers.findIndex(
+    (h) => String(h || "").trim().toLowerCase() === target
+  );
+  };
+
 
       const dateIdx = idxOf(mapping.date);
       const descIdx = idxOf(mapping.description);
       const amtIdx = idxOf(mapping.amount);
       const typeIdx = idxOf(mapping.type);
-      const catIdx = idxOf(mapping.category);
+      const catIdx = mapping.category && mapping.category !== "__none__"
+    ? idxOf(mapping.category)
+    : -1;
 
       const rawDate = dateIdx >= 0 ? row[dateIdx] : "";
       const rawDesc = descIdx >= 0 ? row[descIdx] : "";
@@ -338,7 +552,7 @@ const SmartTransactionImport = ({
         date: tryParseDate(rawDate) || new Date().toISOString().slice(0, 10),
         description: String(rawDesc || "").trim(),
         category: String(rawCat || "Uncategorized").trim() || "Uncategorized",
-        amount: Math.abs(signed),
+        amount: signed,
         type,
         person: selectedPerson || "joint",
         account_id: sourceAccountId ? Number(sourceAccountId) : null,
@@ -349,60 +563,209 @@ const SmartTransactionImport = ({
     [headers, mapping, selectedPerson, sourceAccountId]
   );
 
-  const detectTransferForRow = useCallback(
-    (t) => {
-      if (!detectTransfers) return t;
-      const desc = String(t.description || "").toLowerCase();
-      const src = accounts?.find((a) => String(a.id) === String(t.account_id));
-      if (!src) return t;
 
-      const isPayment = /\b(payment|autopay|pay\s+to|cc\s+payment)\b/.test(desc);
-      if (!isPayment) return t;
+const findAccountByKeywords = (accounts, keywords) => {
+  const ks = (keywords || []).map(k => String(k).toLowerCase());
+  return (accounts || []).find(a => {
+    const hay = `${a.name || ""} ${a.institution || ""}`.toLowerCase();
+    return ks.some(k => hay.includes(k));
+  }) || null;
+};
+const normalizeDesc = (s = "") =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-      const creditAccounts = (accounts || []).filter((a) => a.account_type === "credit");
-      if (creditAccounts.length === 0) return t;
+// “Payment-ish” signal, but NOT enough on its own to mark transfer
+const looksLikePaymentOrTransferSignal = (descNorm) => {
+  // broadened to catch DCU strings
+  return /\b(payment|pay|autopay|thank|e payment|epayment|transfer|xfer|loan payment)\b/.test(descNorm);
+};
 
-      // Try to match by institution/name keywords
-      const pickByKeyword = (kw) => creditAccounts.find((a) => String(a.name || "").toLowerCase().includes(kw) || String(a.institution || "").toLowerCase().includes(kw));
-      let target = null;
+// Build searchable tokens for an account
+const buildAccountTokens = (acct) => {
+  const parts = [
+    acct?.name,
+    acct?.institution,
+  ]
+    .filter(Boolean)
+    .map((x) => normalizeDesc(x));
 
-      if (desc.includes("amex") || desc.includes("american express")) target = pickByKeyword("amex") || pickByKeyword("american");
-      if (!target && (desc.includes("chase") || desc.includes("jp morgan"))) target = pickByKeyword("chase") || pickByKeyword("jpm");
+  const base = parts.join(" ").trim();
 
-      if (!target && creditAccounts.length === 1) target = creditAccounts[0];
+  // Common aliases (safe, low-maintenance). Add more as you like.
+  const alias = [];
+  const blob = `${acct?.name || ""} ${acct?.institution || ""}`.toLowerCase();
 
-      // If importing from a credit account itself, assume the counterparty is a bank/checking.
-      if (src.account_type === "credit") {
-        const bankAccounts = (accounts || []).filter((a) => a.account_type !== "credit");
-        if (bankAccounts.length === 1) target = bankAccounts[0];
+  if (blob.includes("american express") || blob.includes("amex")) alias.push("amex", "american express");
+  if (blob.includes("chase") || blob.includes("jpm")) alias.push("chase", "jp morgan", "jpm");
+  if (blob.includes("capital one") || blob.includes("cap1") || blob.includes("c1")) alias.push("capital one", "cap one", "cap1", "c1");
+  if (blob.includes("discover")) alias.push("discover");
+  if (blob.includes("apple")) alias.push("applecard", "apple card", "gsbankpayment", "gs bank");
+  if (blob.includes("dcu") || blob.includes("digital federal")) alias.push("dcu", "digital federal");
+if (blob.includes("truist") || blob.includes("suntrust")) {
+  alias.push("truist", "suntrust");
+}
+  return new Set([base, ...alias].filter(Boolean));
+};
+
+
+
+const normalizeCreditCardRow = (t, srcAcct) => {
+  const desc = String(t.description || "");
+  const descNorm = normalizeDesc(desc);
+  const amt = Number(t.amount || 0);
+
+  // If already tagged as transfer, don’t override
+  if ((t.transaction_type || "normal") === "transfer") return t;
+
+  // Payments (AUTOPAY PAYMENT, THANK YOU, etc.) => transfer
+  if (looksLikePayment(descNorm)) {
+    return {
+      ...t,
+      transaction_type: "transfer",
+      type: "expense",
+      amount: -Math.abs(amt),
+    };
+  }
+
+  // Refunds/credits => income
+  const looksRefundy =
+    /\b(refund|returned|return|reversal|chargeback|credit)\b/.test(descNorm);
+
+  if (looksRefundy) {
+    return {
+      ...t,
+      transaction_type: "normal",
+      type: "income",
+      amount: Math.abs(amt),
+      category: t.category || "Refund/Credit",
+    };
+  }
+
+  // Default CC purchase => expense
+  return {
+    ...t,
+    transaction_type: "normal",
+    type: "expense",
+    amount: -Math.abs(amt),
+  };
+};
+
+
+const transferTargets = useMemo(() => {
+  const list = (accounts || [])
+    .map((a) => ({
+      id: Number(a.id),
+      account_type: a.account_type,
+      tokens: buildAccountTokens(a),
+      raw: a,
+    }))
+    // targets can be credit, loan, or even other bank accounts
+    .filter((x) => x.id && x.tokens && x.tokens.size > 0);
+
+  return list;
+}, [accounts]);
+
+const detectTransferForRow = useCallback(
+  (t) => {
+    if (!detectTransfers) return t;
+
+    const descNorm = normalizeDesc(t.description || "");
+    const src = (accounts || []).find((a) => String(a.id) === String(t.account_id));
+    if (!src) return t;
+
+    // Don’t override explicit transfer tagging
+    if ((t.transaction_type || "normal") === "transfer") return t;
+
+    // If it doesn't even look like a payment/transfer, bail early
+    if (!looksLikePaymentOrTransferSignal(descNorm)) return t;
+
+    // Find the best matching *other* account based on tokens
+    const candidates = transferTargets.filter((x) => Number(x.id) !== Number(src.id));
+
+    const match = candidates.find((c) => {
+      for (const token of c.tokens) {
+        if (!token) continue;
+        // token could be multi-word, this handles both
+        if (descNorm.includes(token)) return true;
       }
+      return false;
+    });
 
-      if (!target) return t;
+    // IMPORTANT:
+    // If we cannot match to a known account, do NOT classify as transfer.
+    // This prevents “WASHINGTON GAS PAYMENT” from being tagged as transfer.
+    if (!match) return t;
 
-      return {
-        ...t,
-        transaction_type: "transfer",
-        transfer_account_id: Number(target.id),
-      };
-    },
-    [accounts, detectTransfers]
-  );
+    return {
+      ...t,
+      transaction_type: "transfer",
+      transfer_account_id: Number(match.id),
+    };
+  },
+  [accounts, detectTransfers, transferTargets]
+);
 
   const rebuildPreview = useCallback(() => {
-    try {
-      setError(null);
-      if (!dataRows.length || !headers.length) {
-        setPreview([]);
-        return;
-      }
-      const p = dataRows.slice(0, 10).map((r) => detectTransferForRow(buildRowObj(r)));
-      setPreview(p);
-    } catch (e) {
-      console.error("[import] preview failed", e);
-      setError("Could not build preview. Check mapping + CSV format.");
+  try {
+    setError(null);
+
+    if (!dataRows.length || !headers.length) {
       setPreview([]);
+      setImportSummary(null);
+      return;
     }
-  }, [dataRows, headers, buildRowObj, detectTransferForRow]);
+
+    const acctById = new Map((accounts || []).map((a) => [Number(a.id), a]));
+    const srcAcct = sourceAccountId ? acctById.get(Number(sourceAccountId)) : null;
+
+    const normalizeForAccount = (t) => {
+      if (!srcAcct) return t;
+
+      // CREDIT CARD rules (AMEX, etc.)
+      if (srcAcct.account_type === "credit") {
+        return normalizeCreditCardRow(t, srcAcct);
+      }
+
+      // BANK rules are already handled by buildRowObj sign inference + normalizeMoney
+      return t;
+    };
+
+    const p = dataRows
+      .slice(0, 10)
+      .map((r) => buildRowObj(r))
+      .map(normalizeForAccount)
+      .map(detectTransferForRow)
+      .filter((t) => t.description || t.amount); // ✅ match doImport
+
+    setPreview(p);
+    setImportSummary(computeImportSummary(p));
+  } catch (e) {
+    console.error("[import] preview failed", e);
+
+    // ✅ debug logging that exists in this scope
+    console.log("[import] headers:", headers);
+    console.log("[import] first data row:", dataRows?.[0]);
+    console.log("[import] mapping:", mapping);
+    console.log("[import] sourceAccountId:", sourceAccountId);
+
+    setError("Could not build preview. Check mapping + CSV format.");
+    setPreview([]);
+    setImportSummary(null);
+  }
+}, [
+  dataRows,
+  headers,
+  accounts,
+  sourceAccountId,
+  buildRowObj,
+  detectTransferForRow,
+  mapping,
+  computeImportSummary,
+]);
 
   useEffect(() => {
     rebuildPreview();
@@ -424,24 +787,50 @@ const SmartTransactionImport = ({
     }
   };
 
-  const doImport = () => {
-    if (!dataRows.length || !headers.length) {
-      alert("Choose a CSV file first.");
-      return;
-    }
-    if (!sourceAccountId) {
-      alert("Pick a source account (Amex/Chase/Checking) so imports can tag the account.");
-      return;
+const doImport = () => {
+  if (!dataRows.length || !headers.length) {
+    alert("Choose a CSV file first.");
+    return;
+  }
+  if (!sourceAccountId) {
+    alert("Pick a source account (Amex/Chase/Checking) so imports can tag the account.");
+    return;
+  }
+
+  // Build account lookup + source account
+  const acctById = new Map((accounts || []).map((a) => [Number(a.id), a]));
+  const srcAcct = acctById.get(Number(sourceAccountId));
+
+  // Normalize based on source account type (credit vs bank)
+  const normalizeForAccount = (t) => {
+    if (!srcAcct) return t;
+
+    // Credit card import rules (AMEX, etc.)
+    if (srcAcct.account_type === "credit") {
+      return normalizeCreditCardRow(t, srcAcct);
     }
 
-    const rows = dataRows
-      .map((r) => detectTransferForRow(buildRowObj(r)))
-      .filter((t) => t.description || t.amount);
-
-    onImport(rows);
-    setRawRows([]);
-    setFileName("");
+    // Bank/checking/savings: keep as-is (buildRowObj already inferred sign/type)
+    return t;
   };
+
+  const rows = dataRows
+    .map((r) => buildRowObj(r))            // raw rows -> app shape
+    .map(normalizeForAccount)              // ✅ fix AMEX sign/type here
+    .map(detectTransferForRow)             // tag transfers & set transfer_account_id when match exists
+    .filter((t) => t.description || t.amount);
+
+  // Summary should reflect what will be imported
+  setImportSummary(computeImportSummary(rows));
+
+  onImport(rows);
+
+  // reset UI
+  setRawRows([]);
+  setFileName("");
+};
+
+const OPTIONAL_FIELDS = new Set(["category", "type"]);
 
   return (
     <div className="border rounded-lg p-4 bg-white">
@@ -513,17 +902,26 @@ const SmartTransactionImport = ({
           ].map(([key, label]) => (
             <div key={key}>
               <label className="text-xs text-gray-500">{label} column</label>
-              <select
-                value={mapping[key]}
-                onChange={(e) => setMapping((m) => ({ ...m, [key]: e.target.value }))}
-                className="border rounded px-3 py-2 w-full"
-              >
-                {headers.map((h, idx) => (
-                  <option key={`${key}-${idx}`} value={h}>
-                    {h || `Column ${idx + 1}`}
-                  </option>
-                ))}
-              </select>
+<select
+  value={mapping[key]}
+  onChange={(e) =>
+    setMapping((m) => ({ ...m, [key]: e.target.value }))
+  }
+  className="border rounded px-3 py-2 w-full"
+>
+  {OPTIONAL_FIELDS.has(key) && (
+    <option value="__none__">
+      (none – infer from amount)
+    </option>
+  )}
+
+  {headers.map((h, idx) => (
+    <option key={`${key}-${idx}`} value={h}>
+      {h || `Column ${idx + 1}`}
+    </option>
+  ))}
+</select>
+
             </div>
           ))}
         </div>
@@ -548,7 +946,7 @@ const SmartTransactionImport = ({
                   <tr key={idx} className="border-t">
                     <td className="px-3 py-2">{t.date}</td>
                     <td className="px-3 py-2">{t.description}</td>
-                    <td className="px-3 py-2 text-right">${Number(t.amount || 0).toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right">${Math.abs(Number(t.amount || 0)).toLocaleString()}</td>
                     <td className="px-3 py-2">{t.type}</td>
                     <td className="px-3 py-2">
                       {t.transaction_type === "transfer" ? (
@@ -564,6 +962,14 @@ const SmartTransactionImport = ({
           </div>
         </div>
       )}
+{importSummary && (
+  <div className="mt-2 text-sm text-gray-700">
+    <span className="font-semibold">Import Summary:</span>{" "}
+    {importSummary.expenses} expenses,{" "}
+    {importSummary.payments} payments,{" "}
+    {importSummary.refunds} refunds
+  </div>
+)}
 
       <div className="mt-4 flex items-center justify-between">
         <div className="text-xs text-gray-500">
@@ -576,6 +982,12 @@ const SmartTransactionImport = ({
         >
           Import
         </button>
+	<button
+    	  onClick={resetImport}
+    	  className="border px-4 py-2 rounded hover:bg-gray-100"
+  	>
+    	  Cancel
+  	</button>
       </div>
     </div>
   );
@@ -603,6 +1015,21 @@ const sanitizeFileName = (name) => {
   return cleaned || "quote";
 };
 
+//  --------------------------------------------------------------------------
+//  Category Trend Helpers
+//  --------------------------------------------------------------------------
+const lastNMonthKeys = (n = 6, fromDate = new Date()) => {
+  const out = [];
+  const d = new Date(fromDate.getFullYear(), fromDate.getMonth(), 1);
+  for (let i = 0; i < n; i++) {
+    const yy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    out.unshift(`${yy}-${mm}`); // oldest -> newest
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out;
+};
+
 
 // ---------------------------------------------------------------------------
 // Month helpers (Budget Tab improvements)
@@ -621,16 +1048,21 @@ const monthToDb = (monthKey) => {
 };
 
 const prevMonthKey = (monthKey) => {
-  const [y, m] = String(monthKey).split("-").map(Number);
-  const d = new Date(y, (m - 1) - 1, 1);
+  const k = toMonthKey(monthKey);
+  if (!k) return "";
+  const [y, m] = k.split("-").map(Number);
+  const d = new Date(y, m - 2, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
 
 const nextMonthKey = (monthKey) => {
-  const [y, m] = String(monthKey).split("-").map(Number);
-  const d = new Date(y, (m - 1) + 1, 1);
+  const k = toMonthKey(monthKey);
+  if (!k) return "";
+  const [y, m] = k.split("-").map(Number);
+  const d = new Date(y, m, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
+
 
 
 // Stable month label (avoid timezone shifting to prior month)
@@ -826,17 +1258,6 @@ const [editProjectDraft, setEditProjectDraft] = useState(null);
     "Shopping",
     "Other",
   ];
-
-  const PAYMENT_KEYWORDS = [
-  "PAYMENT",
-  "AUTOPAY",
-  "THANK YOU",
-  "ONLINE PAYMENT",
-  "MOBILE PAYMENT",
-  "E-PAYMENT",
-  "ACH PAYMENT",
- ];
-
 
  // Budget categories use the same category list
  const budgetCategories = categories;
@@ -1280,59 +1701,138 @@ const openProjectFileRow = async (fileRow, projectName) => {
     transactionSearch,
   ]);
 
-  const tableTotals = useMemo(() => {
-    let income = 0;
-    let expenses = 0;
+ const tableTotals = useMemo(() => {
+  let income = 0;
+  let expenses = 0;
 
-    tableTransactions.forEach((t) => {
-      const isTransfer = (t.transaction_type || "normal") === "transfer";
-      if (isTransfer) return; // exclude transfers from spending/income totals
-      if (t.type === "income") income += t.amount;
-      if (t.type === "expense") expenses += t.amount;
-    });
+  const isTransfer = (t) => (t.transaction_type || "normal") === "transfer";
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
-    return { income, expenses, net: income - expenses };
-  }, [tableTransactions]);
+  tableTransactions.forEach((t) => {
+    if (isTransfer(t)) return;
+
+    const amt = Math.abs(num(t.amount));
+
+    if (t.type === "income") income += amt;
+    if (t.type === "expense") expenses += amt;
+  });
+
+  return {
+    income,
+    expenses,
+    net: income - expenses,
+  };
+}, [tableTransactions]);
+
+
 
   const groupedTransactionsByMonth = useMemo(() => {
-    const groups = new Map();
+  const groups = new Map();
 
-    tableTransactions.forEach((t) => {
-      if (!t.date) return;
-      const dateObj = parseISO(t.date);
-      if (isNaN(dateObj)) return;
+  tableTransactions.forEach((t) => {
+    if (!t.date) return;
+    const dateObj = parseISO(t.date);
+    if (isNaN(dateObj)) return;
 
-      const key = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, "0")}`;
+    const key = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, "0")}`;
 
-      if (!groups.has(key)) {
-        groups.set(key, {
-          key,
-          label: format(dateObj, "MMMM yyyy"),
-          items: [],
-          income: 0,
-          expenses: 0,
-          net: 0,
-        });
-      }
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: format(dateObj, "MMMM yyyy"),
+        items: [],
+        income: 0,
+        expenses: 0,
+        net: 0,
+      });
+    }
 
-      const group = groups.get(key);
-      group.items.push(t);
+    const group = groups.get(key);
+    group.items.push(t);
 
-      const isTransfer = (t.transaction_type || "normal") === "transfer";
-      if (!isTransfer) {
-        if (t.type === "income") group.income += t.amount;
-        if (t.type === "expense") group.expenses += t.amount;
-      }
-      group.net = group.income - group.expenses;
-    });
+    const isTransfer = (t.transaction_type || "normal") === "transfer";
+    if (!isTransfer) {
+      const amt = Math.abs(Number(t.amount || 0));
+      if (t.type === "income") group.income += amt;
+      if (t.type === "expense") group.expenses += amt;
+    }
 
-    return Array.from(groups.values()).sort((a, b) => (a.key < b.key ? 1 : -1));
-  }, [tableTransactions]);
+    group.net = group.income - group.expenses;
+  });
+
+  return Array.from(groups.values()).sort((a, b) => (a.key < b.key ? 1 : -1));
+}, [tableTransactions]);
+
 
   useEffect(() => {
   if (!currentMonth) return;
   setOpenMonths(new Set([currentMonth]));
 }, [currentMonth]);
+
+const lastNMonthKeys = (n = 6) => {
+  const out = [];
+  const d = new Date();
+  d.setDate(1);
+
+  for (let i = 0; i < n; i++) {
+    const yy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    out.unshift(`${yy}-${mm}`);
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out;
+};
+
+
+//  --------------------------------------------------------------------------
+//  Category Core computation: category x month matrix + rollups
+//  --------------------------------------------------------------------------
+const categoryTrends = useMemo(() => {
+  const months = lastNMonthKeys(6);
+  const monthSet = new Set(months);
+  const byCategory = new Map();
+
+  for (const t of (transactionsByPerson || [])) {
+    if ((t.transaction_type || "normal") === "transfer") continue;
+    if (t.type !== "expense") continue;
+
+    const m = String(t.date || "").slice(0, 7);
+    if (!monthSet.has(m)) continue;
+
+    const cat = String(t.category || "Uncategorized").trim() || "Uncategorized";
+    const spend = Math.abs(Number(t.amount || 0));
+    if (!Number.isFinite(spend) || spend === 0) continue;
+
+    const row = byCategory.get(cat) || {};
+    row[m] = (row[m] || 0) + spend;
+    byCategory.set(cat, row);
+  }
+
+  const rows = Array.from(byCategory.entries()).map(([category, mobj]) => {
+    const series = months.map((m) => Number(mobj[m] || 0));
+    const total = series.reduce((a, b) => a + b, 0);
+
+    const cur = series[series.length - 1] || 0;
+    const prev = series[series.length - 2] || 0;
+    const delta = cur - prev;
+    const pct = prev > 0 ? (delta / prev) * 100 : (cur > 0 ? 100 : 0);
+
+    return { category, series, total, cur, prev, delta, pct };
+  });
+
+  rows.sort((a, b) => (b.cur - a.cur) || (b.total - a.total));
+
+  const top = rows.slice(0, 5);
+  const risers = [...rows]
+    .filter((r) => r.prev >= 25 || r.cur >= 25)
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, 5);
+
+  return { months, rows, top, risers };
+}, [transactionsByPerson]);
+
+
+
 
 //  ---------------------------------------
 // Map: { [projectId]: [fileRow, fileRow...] }
@@ -1435,20 +1935,26 @@ const projectFilesByProjectId = useMemo(() => {
     URL.revokeObjectURL(url);
   };
 
-  // ---------------------------------------------------------------------------
-  // Totals
-  // ---------------------------------------------------------------------------
-  const totalIncome = filteredTransactions
-    .filter((t) => t.type === "income" && (t.transaction_type || "normal") !== "transfer")
-    .reduce((sum, t) => sum + t.amount, 0);
+// ---------------------------------------------------------------------------
+// Totals (exclude transfers, normalize expense sign)
+// ---------------------------------------------------------------------------
 
-  const totalExpenses = filteredTransactions
-    .filter((t) => t.type === "expense" && (t.transaction_type || "normal") !== "transfer")
-    .reduce((sum, t) => sum + t.amount, 0);
+const isTransfer = (t) => (t.transaction_type || "normal") === "transfer";
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
-  const totalAssets = filteredAssets.reduce((sum, a) => sum + a.value, 0);
-  const totalLiabilities = filteredLiabilities.reduce((sum, l) => sum + l.value, 0);
-  const netWorth = totalAssets - totalLiabilities;
+const totalIncome = filteredTransactions
+  .filter((t) => t.type === "income" && !isTransfer(t))
+  .reduce((sum, t) => sum + num(t.amount), 0);
+
+const totalExpenses = filteredTransactions
+  .filter((t) => t.type === "expense" && !isTransfer(t))
+  .reduce((sum, t) => sum + Math.abs(num(t.amount)), 0);
+
+const totalAssets = filteredAssets.reduce((sum, a) => sum + num(a.value), 0);
+const totalLiabilities = filteredLiabilities.reduce((sum, l) => sum + num(l.value), 0);
+
+const netWorth = totalAssets - totalLiabilities;
+
 
   // ---------------------------------------------------------------------------
   // Budget calculations (IMPORTANT: use transactionsByPerson, not filteredTransactions)
@@ -1736,98 +2242,7 @@ const projectFilesByProjectId = useMemo(() => {
       transfer_account_id: null,
     });
   };
-//   ---------------------------------------
-//   Payments Helpers
-//   ---------------------------------------
 
- const looksLikePayment = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
-};
-const looksLikeFeeOrInterest = (desc = "") => {
-  const d = String(desc || "").toUpperCase();
-  return d.includes("INTEREST") || d.includes("FEE");
-};
-
-const looksLikeCardPayment = (desc = "") => {
-  const d = desc.toUpperCase();
-  return PAYMENT_KEYWORDS.some((k) => d.includes(k));
-};
-
-const normalizeImportedRow = (r, acctById, selectedPerson) => {
-  const amountNum = Number(r.amount || 0);
-  const person = r.person || selectedPerson || "joint";
-
-  const acct = r.account_id != null ? acctById.get(Number(r.account_id)) : null;
-  const isCredit = acct?.account_type === "credit";
-
-  // Trust explicit transfer rows coming from the importer
-  if (r.transaction_type === "transfer") {
-    return { ...r, person, amount: amountNum };
-  }
-
-  // CREDIT CARD RULES
-  if (isCredit) {
-    const desc = String(r.description || "");
-
-    // ✅ Payments: Chase may export payments as POSITIVE, Amex often NEGATIVE.
-    // So: if it looks like a payment by description, treat as TRANSFER regardless of sign.
-    if (looksLikeCardPayment(desc)) {
-      return {
-        ...r,
-        person,
-        transaction_type: "transfer",
-        type: "expense", // transfers excluded anyway
-        amount: -Math.abs(amountNum), // on the card account, payment reduces balance
-        category: r.category || "Other",
-      };
-    }
-
-    // ✅ Fees/interest should be expenses
-    if (looksLikeFeeOrInterest(desc)) {
-      return {
-        ...r,
-        person,
-        transaction_type: "normal",
-        type: "expense",
-        amount: -Math.abs(amountNum),
-        category: r.category || "Fees & Adjustments",
-      };
-    }
-
-    // ✅ Default for credit card rows = purchase expense (fixes AMEX market charge)
-    // Purchases sometimes appear positive (balance increases) or negative (some exports).
-    return {
-      ...r,
-      person,
-      transaction_type: "normal",
-      type: "expense",
-      amount: -Math.abs(amountNum),
-    };
-  }
-
-  // NON-CREDIT (checking/savings) RULES
-  if (amountNum > 0) {
-    return {
-      ...r,
-      person,
-      amount: Math.abs(amountNum),
-      type: "income",
-      transaction_type: "normal",
-    };
-  }
-  if (amountNum < 0) {
-    return {
-      ...r,
-      person,
-      amount: -Math.abs(amountNum),
-      type: "expense",
-      transaction_type: "normal",
-    };
-  }
-
-  return { ...r, person, amount: amountNum };
-};
 
 
 const importTransactions = async (rows) => {
@@ -2177,56 +2592,62 @@ if (newProjectFiles?.length) {
 
 
 const addRecurringRule = async () => {
-    if (!session?.user?.id || !householdId) return;
+  if (!session?.user?.id || !householdId) return;
 
-    const description = newRecurring.description?.trim();
-    const amountNum = Number(newRecurring.amount);
+  const description = String(newRecurring.description || "").trim();
+  const amountNum = Number(newRecurring.amount);
 
-    if (!description) {
-      alert("Please enter a description for the recurring item.");
-      return;
-    }
-    if (!Number.isFinite(amountNum)) {
-      alert("Please enter a valid amount.");
-      return;
-    }
+  if (!description) {
+    alert("Please enter a description for the recurring item.");
+    return;
+  }
 
-    const payload = {
-      household_id: householdId,
-      description,
-      category: newRecurring.category,
-      amount: amountNum,
-      type: newRecurring.type,
-      person: newRecurring.person,
-      frequency: "monthly",
-      day_of_month: Number(newRecurring.dayOfMonth) || 1,
-      start_date: null,
-      end_date: null,
-      active: true,
-      created_by: session.user.id,
-    };
+  // Tighten validation: reject empty, NaN, 0, negatives
+  if (!Number.isFinite(amountNum) || amountNum <= 0) {
+    alert("Please enter an amount greater than 0.");
+    return;
+  }
 
-    try {
-      const { data, error } = await supabase
-        .from("recurring_rules")
-        .insert(payload)
-        .select("*")
-        .single();
-
-      if (error) throw error;
-
-      setRecurringRules((prev) => [data, ...prev]);
-      setNewRecurring((prev) => ({
-        ...prev,
-        description: "",
-        amount: "",
-        dayOfMonth: 1,
-      }));
-    } catch (e) {
-      console.error("[db] addRecurringRule failed", e);
-      alert("Could not add recurring rule. Check console for details.");
-    }
+  const payload = {
+    household_id: householdId,
+    description,
+    category: newRecurring.category || "Uncategorized",
+    // Store recurring rule amount as positive; sign is applied later when generating transactions
+    amount: Math.abs(amountNum),
+    type: newRecurring.type || "expense",
+    person: newRecurring.person || "joint",
+    frequency: "monthly",
+    day_of_month: Number(newRecurring.dayOfMonth) || 1,
+    start_date: null,
+    end_date: null,
+    active: true,
+    created_by: session.user.id,
   };
+
+  try {
+    const { data, error } = await supabase
+      .from("recurring_rules")
+      .insert(payload)
+      .select("*")
+      .single();
+
+    if (error) throw error;
+
+    setRecurringRules((prev) => [data, ...prev]);
+
+    // Clear fields you likely want to re-enter; keep category/type/person sticky
+    setNewRecurring((prev) => ({
+      ...(prev || {}),
+      description: "",
+      amount: "",
+      dayOfMonth: 1,
+    }));
+  } catch (e) {
+    console.error("[db] addRecurringRule failed", e);
+    alert("Could not add recurring rule. Check console for details.");
+  }
+};
+
 
 
   // ---------------------------------------------------------------------------
@@ -2670,7 +3091,7 @@ const monthTotals = useMemo(() => {
   if (!selectedMonth) return { income: 0, expenses: 0, net: 0 };
 
   const monthTxns = (transactionsByPerson || []).filter((t) =>
-    (t.date || "").startsWith(selectedMonth)
+    String(t.date || "").startsWith(selectedMonth)
   );
 
   let income = 0;
@@ -2678,13 +3099,16 @@ const monthTotals = useMemo(() => {
 
   for (const t of monthTxns) {
     if ((t.transaction_type || "normal") === "transfer") continue;
-    const amt = Number(t.amount || 0);
+
+    const amt = Math.abs(Number(t.amount || 0));
+
     if (t.type === "income") income += amt;
-    else expenses += amt;
+    if (t.type === "expense") expenses += amt;
   }
 
   return { income, expenses, net: income - expenses };
 }, [transactionsByPerson, selectedMonth]);
+
 
 const projectsQuoteSubtotal = useMemo(() => {
   return (projects ?? []).reduce((sum, p) => {
@@ -3280,22 +3704,40 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
     );
   }
 
-  // Category totals for donut chart
-  const categoryTotals = filteredTransactions
-    .filter((t) => t.type === "expense")
-    .reduce((acc, t) => {
-      acc[t.category] = (acc[t.category] || 0) + t.amount;
-      return acc;
-    }, {});
+const isTransferTxn = (t) => (t.transaction_type || "normal") === "transfer";
+const toNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+const absAmt = (t) => Math.abs(toNum(t.amount));
 
-  // Monthly spending totals
-  const monthlyTotals = filteredTransactions
-    .filter((t) => t.type === "expense")
-    .reduce((acc, t) => {
-      const month = t.date.slice(0, 7);
-      acc[month] = (acc[month] || 0) + t.amount;
-      return acc;
-    }, {});
+// Transfers total (excluded)
+const excludedTransfersTotal = (filteredTransactions || [])
+  .filter(isTransferTxn)
+  .reduce((sum, t) => sum + absAmt(t), 0);
+
+// Dashboard: exclude transfers from spending/income
+const dashboardTransactions = (filteredTransactions || []).filter(
+  (t) => !isTransferTxn(t)
+);
+
+// Spending-only transactions (expenses, excluding transfers)
+const dashboardExpenseTxns = dashboardTransactions.filter(
+  (t) => t.type === "expense"
+);
+
+// Category totals for donut chart (spend totals should be positive)
+const categoryTotals = dashboardExpenseTxns.reduce((acc, t) => {
+  const cat = t.category || "Uncategorized";
+  acc[cat] = (acc[cat] || 0) + absAmt(t);
+  return acc;
+}, {});
+
+// Monthly spending totals (positive)
+const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
+  const month = String(t.date || "").slice(0, 7) || "Unknown";
+  acc[month] = (acc[month] || 0) + absAmt(t);
+  return acc;
+}, {});
+
+
 
   // Net worth history (fake initial values, expands once you add history)
   const netWorthHistory = [
@@ -3356,33 +3798,43 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
 
           </div>
 
-          <div className="flex gap-2 border-b">
-            {["dashboard", "transactions", "assets", "liabilities", "budget", "projects"].map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`px-4 py-2 font-medium capitalize ${
-                  activeTab === tab
-                    ? "text-indigo-600 border-b-2 border-indigo-600"
-                    : "text-gray-600 hover:text-indigo-600"
-                }`}
-              >
-                {tab}
-              </button>
-            ))}
-            <button
-              onClick={clearAllData}
-              className="ml-auto px-4 py-2 text-sm text-red-600 hover:text-red-800"
-            >
-              Clear All Data
-            </button>
-          </div>
+<div className="flex gap-2 border-b">
+  {[
+    { key: "dashboard", label: "Dashboard" },
+    { key: "transactions", label: "Transactions" },
+    { key: "assets", label: "Assets" },
+    { key: "liabilities", label: "Liabilities" },
+    { key: "budget", label: "Budget" },
+    { key: "projects", label: "Projects" },
+    { key: "trends", label: "Trends" },
+  ].map(({ key, label }) => (
+    <button
+      key={key}
+      onClick={() => setActiveTab(key)}
+      className={`px-4 py-2 font-medium ${
+        activeTab === key
+          ? "text-indigo-600 border-b-2 border-indigo-600"
+          : "text-gray-600 hover:text-indigo-600"
+      }`}
+    >
+      {label}
+    </button>
+  ))}
+
+  <button
+    onClick={clearAllData}
+    className="ml-auto px-4 py-2 text-sm text-red-600 hover:text-red-800"
+  >
+    Clear All Data
+  </button>
+</div>
+
         </div>
 
         {/* DASHBOARD TAB */}
         {activeTab === "dashboard" && (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
               <div className="bg-white rounded-lg shadow p-6">
                 <div className="flex items-center justify-between">
                   <div>
@@ -3410,18 +3862,6 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
               <div className="bg-white rounded-lg shadow p-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-gray-600 text-sm">Net Worth</p>
-                    <p className="text-2xl font-bold text-indigo-600">
-                      ${netWorth.toLocaleString()}
-                    </p>
-                  </div>
-                  <Wallet className="text-indigo-600" size={32} />
-                </div>
-              </div>
-
-              <div className="bg-white rounded-lg shadow p-6">
-                <div className="flex items-center justify-between">
-                  <div>
                     <p className="text-gray-600 text-sm">Balance</p>
                     <p className="text-2xl font-bold text-blue-600">
                       ${(totalIncome - totalExpenses).toLocaleString()}
@@ -3430,7 +3870,32 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
                   <DollarSign className="text-blue-600" size={32} />
                 </div>
               </div>
+
+	  <div className="bg-white rounded-lg shadow p-6">
+              <div className="flex items-start justify-between">
+     		<div>
+      		  <p className="text-gray-600 text-sm">Transfers/Payments (excluded from txns.)</p>
+      		  <p className="text-2xl font-bold text-gray-700">
+        	    ${excludedTransfersTotal.toLocaleString()}
+      		  </p>
+    		</div>
+    		<ArrowLeftRight className="text-gray-700" size={32} />
+  	     </div>
+	  </div>
+   	    <div className="bg-white rounded-lg shadow p-6">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-gray-600 text-sm">Net Worth</p>
+                    <p className="text-2xl font-bold text-indigo-600">
+                      ${netWorth.toLocaleString()}
+                    </p>
+                  </div>
+                  <Wallet className="text-indigo-600" size={32} />
+                </div>
             </div>
+
+            </div>
+
 
             <div className="flex gap-2 mb-4">
               {[
@@ -3565,33 +4030,52 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
                   Recent Transactions
                 </h2>
                 <div className="space-y-2">
-                  {filteredTransactions
-                    .slice(-5)
-                    .reverse()
-                    .map((t) => (
-                      <div key={t.id} className="flex justify-between items-center">
-                        <div>
-                          <div className="flex items-center gap-2">
-  			   <p className="font-medium">{t.description}</p>
-  			   {t.recurring_rule_id ? (
-    			   <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
-      				Recurring
-     			   </span>
-  			) : null}
-			</div>
-                          <p className="text-xs text-gray-500">
-                            {t.date} • {personLabels[t.person]}
-                          </p>
-                        </div>
-                        <span
-                          className={`font-bold ${
-                            t.type === "income" ? "text-green-600" : "text-red-600"
-                          }`}
-                        >
-                          {t.type === "income" ? "+" : "-"}${t.amount}
-                        </span>
-                      </div>
-                    ))}
+{filteredTransactions
+  .slice(-5)
+  .reverse()
+  .map((t) => {
+    const isTransfer = (t.transaction_type || "normal") === "transfer";
+    const isIncome = t.type === "income";
+
+    return (
+      <div key={t.id} className="flex justify-between items-center">
+        <div>
+          <div className="flex items-center gap-2">
+            <p className="font-medium">{t.description}</p>
+
+            {t.recurring_rule_id ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700">
+                Recurring
+              </span>
+            ) : null}
+
+            {isTransfer ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-gray-100 text-gray-700">
+                Transfer
+              </span>
+            ) : null}
+          </div>
+
+          <p className="text-xs text-gray-500">
+            {t.date} • {personLabels[t.person]}
+          </p>
+        </div>
+
+        <span
+          className={`font-bold ${
+            isTransfer
+              ? "text-gray-700"
+              : isIncome
+              ? "text-green-600"
+              : "text-red-600"
+          }`}
+        >
+          {isTransfer ? "" : isIncome ? "+" : "-"}${Number(t.amount).toFixed(2)}
+        </span>
+      </div>
+    );
+  })}
+
                 </div>
               </div>
             </div>
@@ -4174,7 +4658,87 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
         </table>
       </div>
 
-      {/* Your existing "Add recurring" form stays below (keep or move) */}
+{/* ADD RECURRING RULE — keep inside recurringOpen */}
+<div className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
+  <input
+    type="text"
+    placeholder="Description"
+    value={newRecurring.description}
+    onChange={(e) =>
+      setNewRecurring((prev) => ({ ...(prev || {}), description: e.target.value }))
+    }
+    className="border rounded px-3 py-2"
+  />
+
+  <select
+    value={newRecurring.category}
+    onChange={(e) =>
+      setNewRecurring((prev) => ({ ...(prev || {}), category: e.target.value }))
+    }
+    className="border rounded px-3 py-2"
+  >
+    {categories.map((cat) => (
+      <option key={cat} value={cat}>
+        {cat}
+      </option>
+    ))}
+  </select>
+
+  <input
+    type="number"
+    placeholder="Amount"
+    value={newRecurring.amount}
+    onChange={(e) =>
+      setNewRecurring((prev) => ({ ...(prev || {}), amount: e.target.value }))
+    }
+    className="border rounded px-3 py-2"
+  />
+
+  <select
+    value={newRecurring.type}
+    onChange={(e) =>
+      setNewRecurring((prev) => ({ ...(prev || {}), type: e.target.value }))
+    }
+    className="border rounded px-3 py-2"
+  >
+    <option value="income">Income</option>
+    <option value="expense">Expense</option>
+  </select>
+
+  <select
+    value={newRecurring.person}
+    onChange={(e) =>
+      setNewRecurring((prev) => ({ ...(prev || {}), person: e.target.value }))
+    }
+    className="border rounded px-3 py-2"
+  >
+    <option value="joint">Joint</option>
+    <option value="you">You</option>
+    <option value="wife">Wife</option>
+  </select>
+
+  <input
+    type="number"
+    min={1}
+    max={31}
+    placeholder="Day"
+    value={newRecurring.dayOfMonth}
+    onChange={(e) =>
+      setNewRecurring((prev) => ({ ...(prev || {}), dayOfMonth: e.target.value }))
+    }
+    className="border rounded px-3 py-2"
+  />
+
+  <button
+    type="button"
+    onClick={addRecurringRule /* or createRecurringRule/addRecurringRuleDb */}
+    className="bg-indigo-600 text-white rounded px-4 py-2 hover:bg-indigo-700 flex items-center justify-center gap-2 md:col-span-6"
+  >
+    {/* If PlusCircle is not imported, remove this icon line */}
+    <PlusCircle size={18} /> Add Recurring Rule
+  </button>
+</div>
+
       {/* (No change required unless you want an “Add New” collapse too.) */}
     </>
   )}
@@ -5923,6 +6487,130 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
 )}
    {/* End of Project Logic */}
 
+   {/* TREND TAB */}
+{activeTab === "trends" && (() => {
+  const lastTrendMonth =
+    categoryTrends.months?.[categoryTrends.months.length - 1];
+
+  return (
+    <div className="space-y-6">
+      {/* Category Trends */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-semibold">Category Trends</h2>
+          <div className="text-xs text-gray-500">
+            Last {categoryTrends.months.length} months
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Top categories */}
+          <div className="border rounded-lg p-4">
+            <div className="text-sm font-semibold mb-2 flex items-center justify-between">
+              <span>Top categories</span>
+              {lastTrendMonth && (
+                <span className="text-xs font-normal text-gray-500">
+                  {monthLabelFromKey(lastTrendMonth)}
+                </span>
+              )}
+            </div>
+
+<div className="space-y-2">
+  {categoryTrends.top.map((r) => {
+    const max = Math.max(...r.series, 1);
+
+    return (
+      <div key={r.category} className="py-3 border-b last:border-b-0">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="font-semibold truncate">{r.category}</div>
+              <div className="shrink-0 text-right font-semibold tabular-nums">
+                ${r.cur.toLocaleString()}
+              </div>
+            </div>
+
+           {/* Sparkline */}
+<div className="mt-1 h-5 flex items-end gap-1">
+  {r.series.map((v, idx) => {
+    const h = Math.round((v / max) * 18);
+    const isLast = idx === r.series.length - 1;
+
+    const barColor = isLast
+      ? r.delta >= 0
+        ? "bg-red-400"
+        : "bg-green-400"
+      : "bg-gray-300";
+
+    return (
+      <div
+        key={idx}
+        title={`${categoryTrends.months[idx]}: $${v.toLocaleString()}`}
+        className={`w-2 rounded-sm ${barColor} transition-all duration-500 ease-out`}
+        style={{
+          height: `${Math.max(2, h)}px`,
+          transitionDelay: `${idx * 40}ms`, // nice cascade
+        }}
+      />
+    );
+  })}
+</div>
+
+
+
+            <div className="mt-1 text-xs text-gray-500">
+              vs prev:{" "}
+              <span className="font-medium tabular-nums">
+                {r.delta >= 0 ? "+" : "-"}${Math.abs(r.delta).toLocaleString()}
+              </span>
+              {r.prev > 0 && (
+                <span className="ml-2">
+                  ({r.pct >= 0 ? "+" : ""}
+                  {Number.isFinite(r.pct) ? r.pct.toFixed(0) : "0"}%)
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  })}
+</div>
+
+          </div>
+
+          {/* Biggest increases */}
+          <div className="border rounded-lg p-4">
+            <div className="text-sm font-semibold mb-2">
+              Biggest increases (MoM)
+            </div>
+
+            <div className="space-y-2">
+              {categoryTrends.risers.map((r) => (
+                <div
+                  key={r.category}
+                  className="flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0 truncate font-medium">
+                    {r.category}
+                  </div>
+                  <div className="text-right font-semibold text-red-700">
+                    +${Math.max(0, r.delta).toLocaleString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+})()}
+
+
+   {/* End of TREND TAB */}
+
+
       </div>  {/* closes max-w-7xl mx-auto */}
     </div>  {/* closes min-h-screen div */}
     </div>  {/* closes blur/disable wrapper */}
@@ -5949,8 +6637,6 @@ const replaceProjectFile = async ({ projectId, oldFileRow, newFile }) => {
         />
       )}
     </div>
-        
-
   );
 };
 
