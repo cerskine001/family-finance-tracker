@@ -1959,34 +1959,36 @@ const netWorth = totalAssets - totalLiabilities;
   // ---------------------------------------------------------------------------
   // Budget calculations (IMPORTANT: use transactionsByPerson, not filteredTransactions)
   // ---------------------------------------------------------------------------
-  const getBudgetProgress = useCallback(
-    (category, month) => {
-      const budgetRow = filteredBudgets.find(
-        (b) => b.category === category && b.month === month
-      );
-      if (!budgetRow) return null;
+ const getBudgetProgress = useCallback(
+  (category, month) => {
+    const budgetRow = filteredBudgets.find(
+      (b) => b.category === category && b.month === month
+    );
+    if (!budgetRow) return null;
 
-      const spent = transactionsByPerson
-        .filter(
-          (t) =>
-            t.type === "expense" &&
-            (t.transaction_type || "normal") !== "transfer" &&
-            t.category === category &&
-            t.date &&
-            t.date.startsWith(month)
-        )
-        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const spent = transactionsByPerson
+      .filter(
+        (t) =>
+          t.type === "expense" &&
+          (t.transaction_type || "normal") !== "transfer" &&
+          t.category === category &&
+          t.date &&
+          t.date.startsWith(month)
+      )
+      // ✅ expenses are stored negative; spending should be positive
+      .reduce((sum, t) => sum + Math.abs(Number(t.amount || 0)), 0);
 
-      const budget = Number(budgetRow.amount || 0);
-      const percentage = budget > 0 ? (spent / budget) * 100 : 0;
+    const budget = Number(budgetRow.amount || 0);
+    const percentage = budget > 0 ? (spent / budget) * 100 : 0;
 
-      const remaining = budget - spent;
-      const overBy = Math.max(0, spent - budget);
+    const remaining = budget - spent;
+    const overBy = Math.max(0, spent - budget);
 
-      return { budget, spent, percentage, remaining, overBy };
-    },
-    [filteredBudgets, transactionsByPerson]
-  );
+    return { budget, spent, percentage, remaining, overBy };
+  },
+  [filteredBudgets, transactionsByPerson]
+);
+
 
   const getBudgetTransactions = useCallback(
     (category, month) => {
@@ -5750,15 +5752,24 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
               </div>
 
               <div className="border rounded-lg p-4">
-                <p className="text-xs text-gray-500">Remaining</p>
-                <p
-                  className={`text-xl font-bold ${
-                    (budgetSummary.remaining || 0) < 0 ? "text-red-600" : "text-green-700"
-                  }`}
-                >
-                  ${Number(budgetSummary.remaining || 0).toLocaleString()}
-                </p>
+		<p className="text-xs text-gray-500">
+    		{(budgetSummary.remaining || 0) < 0 ? "Over by" : "Remaining"}
+  		</p>
+
+  		<p
+    		className={`text-xl font-bold ${
+      		(budgetSummary.remaining || 0) < 0 ? "text-red-600" : "text-green-700"
+    		}`}
+  		>
+    		$
+    		{Number(
+      		(budgetSummary.remaining || 0) < 0
+        	? Math.abs(budgetSummary.remaining || 0)
+        	: budgetSummary.remaining || 0
+    		).toLocaleString()}
+  		</p>
               </div>
+
             </div>
 
             {/* Per-category budget cards (only for budgetViewMonth) */}
@@ -5782,6 +5793,9 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
   		const effectivePct = effectiveBudget > 0 ? (spentNum / effectiveBudget) * 100 : 0;
   		const effectiveRemaining = effectiveBudget - spentNum;
   		const effectiveOverBy = Math.max(0, spentNum - effectiveBudget);
+		const isOver = effectiveRemaining < 0;
+		const remainingLabel = isOver ? "Over by" : "Remaining";
+		const remainingValue = isOver ? effectiveOverBy : effectiveRemaining;
 
                 return (
                   <div key={b.id} className="border rounded p-4">
@@ -5938,14 +5952,10 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
                           </div>
 
                           <div className="text-gray-700">
-                            <span className="text-gray-500">Remaining:</span>{" "}
-                            <span
-                              className={`font-semibold ${
-                                effectiveRemaining < 0 ? "text-red-600" : "text-green-700"
-                              }`}
-                            >
-                              ${Number(effectiveRemaining).toLocaleString()}
-                            </span>
+                           <span className="text-gray-500">{remainingLabel}:</span>{" "}
+  			<span className={isOver ? "text-red-600 font-semibold" : "text-green-700 font-semibold"}>
+    				${Number(remainingValue || 0).toLocaleString()}
+  			</span>
                           </div>
 
                           <div className="text-gray-700 md:text-right">

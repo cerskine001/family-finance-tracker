@@ -5752,24 +5752,15 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
               </div>
 
               <div className="border rounded-lg p-4">
-		<p className="text-xs text-gray-500">
-    		{(budgetSummary.remaining || 0) < 0 ? "Over by" : "Remaining"}
-  		</p>
-
-  		<p
-    		className={`text-xl font-bold ${
-      		(budgetSummary.remaining || 0) < 0 ? "text-red-600" : "text-green-700"
-    		}`}
-  		>
-    		$
-    		{Number(
-      		(budgetSummary.remaining || 0) < 0
-        	? Math.abs(budgetSummary.remaining || 0)
-        	: budgetSummary.remaining || 0
-    		).toLocaleString()}
-  		</p>
+                <p className="text-xs text-gray-500">Remaining</p>
+                <p
+                  className={`text-xl font-bold ${
+                    (budgetSummary.remaining || 0) < 0 ? "text-red-600" : "text-green-700"
+                  }`}
+                >
+                  ${Number(budgetSummary.remaining || 0).toLocaleString()}
+                </p>
               </div>
-
             </div>
 
             {/* Per-category budget cards (only for budgetViewMonth) */}
@@ -5793,9 +5784,6 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
   		const effectivePct = effectiveBudget > 0 ? (spentNum / effectiveBudget) * 100 : 0;
   		const effectiveRemaining = effectiveBudget - spentNum;
   		const effectiveOverBy = Math.max(0, spentNum - effectiveBudget);
-		const isOver = effectiveRemaining < 0;
-		const remainingLabel = isOver ? "Over by" : "Remaining";
-		const remainingValue = isOver ? effectiveOverBy : effectiveRemaining;
 
                 return (
                   <div key={b.id} className="border rounded p-4">
@@ -5952,10 +5940,14 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
                           </div>
 
                           <div className="text-gray-700">
-                           <span className="text-gray-500">{remainingLabel}:</span>{" "}
-  			<span className={isOver ? "text-red-600 font-semibold" : "text-green-700 font-semibold"}>
-    				${Number(remainingValue || 0).toLocaleString()}
-  			</span>
+                            <span className="text-gray-500">Remaining:</span>{" "}
+                            <span
+                              className={`font-semibold ${
+                                effectiveRemaining < 0 ? "text-red-600" : "text-green-700"
+                              }`}
+                            >
+                              ${Number(effectiveRemaining).toLocaleString()}
+                            </span>
                           </div>
 
                           <div className="text-gray-700 md:text-right">
