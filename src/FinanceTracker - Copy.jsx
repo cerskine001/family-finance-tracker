@@ -298,6 +298,89 @@ const looksLikeFeeOrInterest = (desc = "") => {
   return d.includes("INTEREST") || d.includes("FEE");
 };
 
+// --------------------------------------------------------------
+// parse Month
+// --------------------------------------------------------------
+const parseMonthKey = (monthKey) => {
+  // monthKey like "2026-01"
+  const [y, m] = String(monthKey).split("-").map(Number);
+  return { year: y, monthIndex: m - 1 }; // JS Date month is 0-based
+};
+
+const daysInMonth = (year, monthIndex) => {
+  // day 0 of next month = last day of month
+  return new Date(year, monthIndex + 1, 0).getDate();
+};
+
+const isSameMonth = (a, b) =>
+  a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+
+const pacingHintForMonth = ({
+  monthKey,
+  effectiveBudget,
+  spent,
+  tolerance = 0.07,
+}) => {
+  const budget = Number(effectiveBudget || 0);
+  const spentNum = Number(spent || 0);
+
+  if (budget <= 0) return null; // no pacing hint if no budget
+
+  const now = new Date();
+  const { year, monthIndex } = parseMonthKey(monthKey);
+  const viewStart = new Date(year, monthIndex, 1);
+  const dim = daysInMonth(year, monthIndex);
+
+  // If viewing a past/future month, keep it simple and accurate
+  if (!isSameMonth(now, viewStart)) {
+    const isPast =
+      year < now.getFullYear() ||
+      (year === now.getFullYear() && monthIndex < now.getMonth());
+    const isFuture =
+      year > now.getFullYear() ||
+      (year === now.getFullYear() && monthIndex > now.getMonth());
+
+    if (isPast) {
+      return {
+        text: `Month complete · ${spentNum <= budget ? "Within budget" : "Over budget"}`,
+        status: spentNum <= budget ? "ahead" : "behind",
+      };
+    }
+
+    if (isFuture) {
+      return { text: "Month hasn’t started yet", status: "neutral" };
+    }
+  }
+
+  // Current month pacing
+  const day = Math.min(dim, Math.max(1, now.getDate()));
+  const elapsedRatio = day / dim;
+
+  const expected = budget * elapsedRatio;
+
+  const low = expected * (1 - tolerance);
+  const high = expected * (1 + tolerance);
+
+  let status = "pace";
+  if (spentNum < low) status = "ahead";
+  else if (spentNum > high) status = "behind";
+
+  const label = status === "ahead" ? "Ahead" : status === "behind" ? "Behind" : "On pace";
+
+return {
+  day,
+  dim,
+  status,
+  label,
+  expected,
+};
+
+};
+
+
+
+
+
 //   ---------------------------------------
 //   Payments Helpers
 //   ---------------------------------------
@@ -5790,7 +5873,26 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
   		const baseBudget = Number(progress.budget || 0);
   		const effectiveBudget = Math.max(0, baseBudget + rollover);
   		const spentNum = Number(progress.spent || 0);
+		 const pacing = pacingHintForMonth({
+    			monthKey: b.month,
+    			effectiveBudget,
+    			spent: spentNum,
+    			tolerance: 0.07,
+  		});
   		const effectivePct = effectiveBudget > 0 ? (spentNum / effectiveBudget) * 100 : 0;
+const isFullySpent = spentNum >= effectiveBudget && effectiveBudget > 0;
+const pacingLabel =
+  isFullySpent
+    ? "Paid early"
+    : pacing?.status === "ahead"
+    ? "Ahead"
+    : pacing?.status === "behind"
+    ? "Behind"
+    : pacing?.status === "pace"
+    ? "On pace"
+    : null;
+
+
   		const effectiveRemaining = effectiveBudget - spentNum;
   		const effectiveOverBy = Math.max(0, spentNum - effectiveBudget);
 		const isOver = effectiveRemaining < 0;
@@ -5799,6 +5901,35 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
 
                 return (
                   <div key={b.id} className="border rounded p-4">
+{pacing && (
+  <div
+    className={`text-xs mt-1 ${
+      pacing.status === "ahead"
+        ? "text-green-700"
+        : pacing.status === "behind"
+        ? "text-red-600"
+        : pacing.status === "pace"
+        ? "text-gray-600"
+        : "text-gray-500"
+    }`}
+  >
+    Day {pacing.day} of {pacing.dim} ·{" "}
+    {isFullySpent ? "Paid early" : pacing.label}
+  </div>
+)}
+{pacing?.status === "behind" && !isFullySpent && typeof pacing.expected === "number" && (
+  <div className="text-xs text-gray-500 mt-0.5">
+    Target by today: ${Number(pacing.expected).toLocaleString()}
+  </div>
+)}
+
+{isFullySpent && (
+  <div className="text-xs text-gray-500 mt-0.5">
+    Paid early · Fixed monthly expense
+  </div>
+)}
+
+
                     <div className="flex justify-between items-center mb-3">
                       <div>
                         <div className="flex items-center gap-2">
