@@ -5881,16 +5881,36 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
   		});
   		const effectivePct = effectiveBudget > 0 ? (spentNum / effectiveBudget) * 100 : 0;
 const isFullySpent = spentNum >= effectiveBudget && effectiveBudget > 0;
+
+const isOverBudget = spentNum > effectiveBudget;
+
+// Treat "fully spent" as its own display state
+const pacingMode =
+  isFullySpent && !isOverBudget
+    ? "fixed_paid"          // Housing paid early (or exactly used)
+    : isFullySpent && isOverBudget
+    ? "exhausted"           // Variable category blew past budget
+    : pacing?.status || "neutral"; // ahead / pace / behind / neutral
+
 const pacingLabel =
-  isFullySpent
+  pacingMode === "fixed_paid"
     ? "Paid early"
-    : pacing?.status === "ahead"
-    ? "Ahead"
-    : pacing?.status === "behind"
-    ? "Behind"
-    : pacing?.status === "pace"
-    ? "On pace"
-    : null;
+    : pacingMode === "exhausted"
+    ? "Budget exhausted"
+    : pacing?.label || "";
+
+const pacingColorClass =
+  pacingMode === "fixed_paid"
+    ? "text-gray-600"
+    : pacingMode === "exhausted"
+    ? "text-red-600"
+    : pacingMode === "ahead"
+    ? "text-green-700"
+    : pacingMode === "behind"
+    ? "text-red-600"
+    : pacingMode === "pace"
+    ? "text-gray-600"
+    : "text-gray-500";
 
 
   		const effectiveRemaining = effectiveBudget - spentNum;
@@ -5902,32 +5922,25 @@ const pacingLabel =
                 return (
                   <div key={b.id} className="border rounded p-4">
 {pacing && (
-  <div
-    className={`text-xs mt-1 ${
-      pacing.status === "ahead"
-        ? "text-green-700"
-        : pacing.status === "behind"
-        ? "text-red-600"
-        : pacing.status === "pace"
-        ? "text-gray-600"
-        : "text-gray-500"
-    }`}
-  >
-    Day {pacing.day} of {pacing.dim} ·{" "}
-    {isFullySpent ? "Paid early" : pacing.label}
-  </div>
-)}
-{pacing?.status === "behind" && !isFullySpent && typeof pacing.expected === "number" && (
-  <div className="text-xs text-gray-500 mt-0.5">
-    Target by today: ${Number(pacing.expected).toLocaleString()}
+  <div className={`text-xs mt-1 ${pacingColorClass}`}>
+    Day {pacing.day} of {pacing.dim} · {pacingLabel}
   </div>
 )}
 
-{isFullySpent && (
+{pacingMode === "behind" &&
+  typeof pacing?.expected === "number" && (
+    <div className="text-xs text-gray-500 mt-0.5">
+      Target by today: ${Number(pacing.expected).toLocaleString()}
+    </div>
+  )}
+
+
+{pacingMode === "fixed_paid" && (
   <div className="text-xs text-gray-500 mt-0.5">
     Paid early · Fixed monthly expense
   </div>
 )}
+
 
 
                     <div className="flex justify-between items-center mb-3">
