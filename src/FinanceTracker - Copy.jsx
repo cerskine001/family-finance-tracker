@@ -377,10 +377,6 @@ return {
 
 };
 
-
-
-
-
 //   ---------------------------------------
 //   Payments Helpers
 //   ---------------------------------------
@@ -1330,6 +1326,12 @@ const [editProjectDraft, setEditProjectDraft] = useState(null);
  const [projectFiles, setProjectFiles] = useState([]);
  const [editProjectFiles, setEditProjectFiles] = useState([]);
 
+ // AI: budget summary
+ const [aiBudgetSummary, setAiBudgetSummary] = useState(null);
+ const [aiBudgetLoading, setAiBudgetLoading] = useState(false);
+ const [aiBudgetError, setAiBudgetError] = useState(null);
+ const [aiBudgetOpen, setAiBudgetOpen] = useState(true); // or false if you prefer collapsed by default
+
 
   const categories = [
     "Food",
@@ -1341,6 +1343,22 @@ const [editProjectDraft, setEditProjectDraft] = useState(null);
     "Shopping",
     "Other",
   ];
+
+
+// Pull a “takeaway” line if present, else use first non-empty line.
+const aiBudgetPreview = (() => {
+  const txt = (aiBudgetSummary || "").trim();
+  if (!txt) return "";
+  const lines = txt.split("\n").map(l => l.trim()).filter(Boolean);
+
+  const takeawayLine =
+    lines.find(l => /^takeaway:/i.test(l)) ||
+    lines.find(l => /^key takeaway:/i.test(l));
+
+  const pick = takeawayLine || lines[0] || "";
+  return pick.length > 140 ? pick.slice(0, 140) + "…" : pick;
+})();
+
 
  // Budget categories use the same category list
  const budgetCategories = categories;
@@ -2103,6 +2121,10 @@ const netWorth = totalAssets - totalLiabilities;
   [transactionsByPerson]
 );
 
+
+
+
+
   const getTopContributors = (txns, topN = 3) => {
     const map = new Map();
 
@@ -2268,6 +2290,115 @@ const netWorth = totalAssets - totalLiabilities;
   rolloverEnabled,
   rolloverByCategoryForViewMonth,
 ]);
+
+const budgetViewMonthKey = budgetViewMonth;
+
+const buildBudgetAiPayload = useCallback(
+  ({ force } = {}) => {
+    const monthKey = budgetViewMonth; // "YYYY-MM"
+    const monthLabel = monthLabelFromKey(monthKey);
+
+    const round2 = (n) => {
+      const x = Number(n);
+      return Number.isFinite(x) ? Math.round(x * 100) / 100 : 0;
+    };
+
+    // Totals shown in your summary cards
+    const plannedBudget = round2(budgetSummary.totalBudget);
+    const actualSpending = round2(budgetSummary.totalSpent);
+    const remaining = round2(budgetSummary.remaining);
+
+    const highlights = budgetsForViewMonthAndSearch
+      .map((b) => {
+        const p = getBudgetProgress(b.category, b.month);
+        if (!p) return null;
+
+        const rollover = round2(rolloverByCategoryForViewMonth[b.category] || 0);
+        const baseBudget = round2(p.budget || 0);
+        const effectiveBudget = round2(Math.max(0, baseBudget + rollover));
+
+        const spent = round2(p.spent || 0);
+        const remainingCat = round2(effectiveBudget - spent);
+
+        const ratio = effectiveBudget > 0 ? spent / effectiveBudget : 0;
+
+        const status =
+          spent > effectiveBudget
+            ? "over"
+            : effectiveBudget > 0 && spent >= effectiveBudget
+            ? "exhausted"
+            : ratio >= 0.8
+            ? "watch"
+            : "ok";
+
+        return {
+          category: b.category,
+          status,
+          budget: effectiveBudget,
+          spent,
+          remaining: remainingCat,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (b.spent || 0) - (a.spent || 0))
+      .slice(0, 8);
+
+    return {
+      monthKey,         // handy for caching/debugging
+      monthLabel,
+      plannedBudget,
+      actualSpending,
+      remaining,
+      highlights,
+      force: !!force,   // if you want Edge Function to treat it as cache-bypass
+    };
+  },
+  [
+    budgetViewMonth,
+    budgetSummary,
+    budgetsForViewMonthAndSearch,
+    rolloverByCategoryForViewMonth,
+    getBudgetProgress,
+  ]
+);
+
+
+
+const runAiBudgetSummary = useCallback(async ({ force } = {}) => {
+  try {
+    setAiBudgetLoading(true);
+    setAiBudgetError(null);
+
+    const payload = buildBudgetAiPayload(); // don't pass force unless builder expects it
+
+    // ✅ Use the same token that proved to work in console:
+    const anon = supabase.supabaseKey; // legacy eyJ... (NOT sb_publishable)
+    if (!anon || !anon.startsWith("eyJ")) {
+      throw new Error(
+        `Supabase key is not legacy JWT (got: ${String(anon).slice(0, 12)}...)`
+      );
+    }
+
+    const { data, error } = await supabase.functions.invoke("ai-budget-summary", {
+      body: payload,
+      headers: { Authorization: `Bearer ${anon}` },
+    });
+
+    if (error) throw error;
+    if (!data?.text) throw new Error("AI returned no text.");
+
+    setAiBudgetSummary(data.text);
+  } catch (err) {
+    console.error("[ai-budget-summary] failed", err);
+    setAiBudgetError(err?.message || "Failed to generate AI budget summary");
+  } finally {
+    setAiBudgetLoading(false);
+  }
+}, [buildBudgetAiPayload]);
+
+
+
+
 
 
   // ---------------------------------------------------------------------------
@@ -5854,6 +5985,81 @@ const monthlyTotals = dashboardExpenseTxns.reduce((acc, t) => {
               </div>
 
             </div>
+
+{/* AI Monthly Summary */}
+<div className="border rounded-lg p-4 mb-6 bg-white">
+  {/* Header row */}
+  <div className="flex items-center justify-between gap-3">
+    <div className="min-w-0">
+      <p className="text-sm font-semibold text-gray-900">Monthly AI Summary</p>
+      <p className="text-xs text-gray-500">
+        Uses your planned budget, actual spending, and category highlights for{" "}
+        {monthLabelFromKey(budgetViewMonthKey)}.
+      </p>
+    </div>
+
+    <div className="flex items-center gap-3">
+      {/* Expand/Collapse */}
+      {!!aiBudgetSummary && !aiBudgetError && (
+        <button
+          type="button"
+          onClick={() => setAiBudgetOpen((v) => !v)}
+          className="text-sm text-gray-600 hover:text-gray-900 underline inline-flex items-center gap-1"
+        >
+          <span
+            className={`inline-block transition-transform ${
+              aiBudgetOpen ? "rotate-90" : ""
+            }`}
+          >
+            ▶
+          </span>
+          {aiBudgetOpen ? "Collapse" : "Expand"}
+        </button>
+      )}
+
+      <button
+        type="button"
+        onClick={() => runAiBudgetSummary({ force: false })}
+        disabled={aiBudgetLoading}
+        className="bg-indigo-600 text-white text-sm px-3 py-2 rounded hover:bg-indigo-700 disabled:opacity-60"
+      >
+        {aiBudgetLoading ? "Generating..." : "Generate"}
+      </button>
+
+      <button
+        type="button"
+        onClick={() => runAiBudgetSummary({ force: true })}
+        disabled={aiBudgetLoading}
+        className="border text-sm px-3 py-2 rounded hover:bg-gray-50 disabled:opacity-60"
+        title="Regenerate and overwrite cache"
+      >
+        Regenerate
+      </button>
+    </div>
+  </div>
+
+  {/* Body (ONLY place summary renders) */}
+  {aiBudgetError ? (
+    <p className="mt-3 text-sm text-red-600">{aiBudgetError}</p>
+  ) : aiBudgetSummary ? (
+    aiBudgetOpen ? (
+      <div className="mt-3 text-sm text-gray-800 whitespace-pre-line leading-relaxed">
+        {aiBudgetSummary}
+      </div>
+    ) : aiBudgetPreview ? (
+      <div className="mt-3 w-full text-sm italic text-gray-600 whitespace-normal break-words">
+        <span className="font-medium not-italic">Preview:</span>{" "}
+        {aiBudgetPreview}
+      </div>
+    ) : null
+  ) : (
+    <div className="mt-3 text-sm text-gray-500">
+      Click Generate to create a short summary and takeaway.
+    </div>
+  )}
+</div>
+
+
 
             {/* Per-category budget cards (only for budgetViewMonth) */}
             <div className="space-y-6">
