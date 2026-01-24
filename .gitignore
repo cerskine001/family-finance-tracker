@@ -25,3 +25,10 @@ dist-ssr
 
 .vercel
 .env*.local
+
+# secrets
+OPEN_AIKey.txt
+.env
+.env.*
+!.env.example
+
